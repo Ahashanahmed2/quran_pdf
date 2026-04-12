@@ -7,8 +7,8 @@ requests==2.32.3
 pillow==11.0.0
 sentence-transformers==2.7.0
 transformers==4.40.0
-accelerate==0.33.0
-huggingface-hub==0.20.0
+huggingface-hub==0.26.2
+accelerate==0.27.2
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2+cpu
 torchvision==0.17.2+cpu
