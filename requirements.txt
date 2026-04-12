@@ -6,9 +6,6 @@ pinecone-client==5.0.1
 requests==2.32.3
 pillow==11.0.0
 sentence-transformers==2.7.0
-transformers==4.40.0
 huggingface-hub==0.26.2
-accelerate==0.27.2
-tokenizers==0.19.1
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.9.0+cpu
