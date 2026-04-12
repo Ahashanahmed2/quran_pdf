@@ -99,7 +99,7 @@ def save_to_pinecone(filename, chunks):
             "metadata": {
                 "filename": filename,
                 "chunk_index": i,
-                "text": chunk[:1000]  # টেক্সট সীমিত রাখা
+                "text": chunk[:1000]
             }
         })
     
@@ -228,11 +228,6 @@ async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ শুধুমাত্র PDF ফাইল সমর্থিত।")
             return
         
-        # ফাইল সাইজ চেক (টেলিগ্রাম বট API লিমিট 20MB)
-        if document.file_size > 20 * 1024 * 1024:
-            await update.message.reply_text("❌ ফাইল সাইজ 20MB-এর বেশি। ছোট PDF পাঠান।")
-            return
-        
         status_msg = await update.message.reply_text(f"⏳ '{document.file_name}' ডাউনলোড হচ্ছে...")
         
         try:
@@ -275,7 +270,6 @@ async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"❌ PDF প্রসেসিং ত্রুটি: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
     else:
-        logger.info(f"📎 No document in message")
         await update.message.reply_text("📎 দয়া করে একটি PDF ফাইল পাঠান।")
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,10 +332,11 @@ HF API: {hf_status}
 """
     await update.message.reply_text(status_text, parse_mode="Markdown")
 
-# --- ৬. FastAPI Lifespan ---
+# --- ৬. FastAPI Lifespan (বর্ধিত টাইমআউট সহ) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    request = HTTPXRequest(connection_pool_size=10, read_timeout=60, write_timeout=60)
+    # বড় ফাইলের জন্য টাইমআউট বাড়ানো হয়েছে (১২০ সেকেন্ড)
+    request = HTTPXRequest(connection_pool_size=10, read_timeout=120, write_timeout=120, connect_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=request)
     
     ptb_app = Application.builder().bot(bot).build()
