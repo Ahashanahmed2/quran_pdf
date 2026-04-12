@@ -1,9 +1,7 @@
-#main.py
 import os
 import asyncio
 import io
 import requests
-import base64
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from telegram import Update, Bot
@@ -19,15 +17,14 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- ২. কনফিগারেশন ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8613624366:AAHWX_Y_7bH5V8Mw4hfUQ0nfPaGrfZ-ROgw")
-PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "pcsk_7XHfjD_Ekff9WkF5MPke5mUwFTQ24ctf45NnvbWDXXQEozdEf8aHHHNRgH4PzpfHDwRZqE")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "YOUR_PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quran-pdf-index")
-HF_API_KEY = os.environ.get("HF_API_KEY", "")  # Hugging Face API Key (https://huggingface.co/settings/tokens)
+HF_API_KEY = os.environ.get("HF_API_KEY", "")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
-PORT = int(os.environ.get("PORT", 8080))
-SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "your_secure_webhook_secret_here")
+SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "my_super_secret_token_2026")
 
-# Hugging Face Inference API কনফিগ [citation:1]
+# Hugging Face Inference API কনফিগ
 HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-4-E2B-it"
 HF_HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"} if HF_API_KEY else {}
 
@@ -117,7 +114,7 @@ def search_in_pinecone(query, top_k=3):
     
     return chunks
 
-# --- ৫. Hugging Face Gemma API দিয়ে উত্তর জেনারেশন [citation:1][citation:9]---
+# --- ৫. Hugging Face Gemma API দিয়ে উত্তর জেনারেশন ---
 def generate_answer_with_gemma(question, context_chunks):
     """Hugging Face Inference API ব্যবহার করে Gemma দিয়ে উত্তর জেনারেট করা"""
     
@@ -130,7 +127,7 @@ def generate_answer_with_gemma(question, context_chunks):
     # কনটেক্সট তৈরি
     context_text = "\n\n---\n\n".join([f"[উৎস: {c['filename']}]\n{c['text']}" for c in context_chunks])
     
-    # Gemma 4 স্টাইলে প্রম্পট তৈরি [citation:2]
+    # Gemma 4 স্টাইলে প্রম্পট তৈরি
     prompt = f"""<|turn|>system
 তুমি একটি সহায়ক AI সহকারী। নিচের প্রসঙ্গ তথ্যের ভিত্তিতে ব্যবহারকারীর প্রশ্নের উত্তর দাও। উত্তর যেন তথ্যভিত্তিক ও নির্ভুল হয়। যদি প্রসঙ্গে উত্তর না থাকে, তাহলে "প্রদত্ত তথ্যে উত্তর পাওয়া যায়নি" বলবে।
 <turn|>
@@ -144,7 +141,6 @@ def generate_answer_with_gemma(question, context_chunks):
 """
     
     try:
-        # Hugging Face Inference API কল [citation:1]
         response = requests.post(
             HF_API_URL,
             headers=HF_HEADERS,
@@ -167,7 +163,6 @@ def generate_answer_with_gemma(question, context_chunks):
             elif isinstance(result, dict):
                 return result.get('generated_text', 'কোনো উত্তর পাওয়া যায়নি।').strip()
         elif response.status_code == 503:
-            # মডেল লোড হচ্ছে, একটু অপেক্ষা করতে হবে [citation:1]
             logger.info("মডেল লোড হচ্ছে, ১০ সেকেন্ড অপেক্ষা করে আবার চেষ্টা করুন...")
             return "⏳ মডেল লোড হচ্ছে, দয়া করে কয়েক সেকেন্ড পর আবার চেষ্টা করুন।"
         else:
@@ -291,12 +286,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **মডেল:** Gemma 4 E2B (Hugging Face Inference API)
 **Pinecone:** সংযুক্ত ✅
 **HF API:** {hf_status}
-**ফ্রি টায়ার:** ৫০০০ রিকোয়েস্ট/মাস [citation:1]
+**ফ্রি টায়ার:** ৫০০০ রিকোয়েস্ট/মাস
 """
     await update.message.reply_text(status_text, parse_mode="Markdown")
 
-# --- 7. FastAPI Lifespan: Webhook সেটআপ ---
-# --- 7. FastAPI Lifespan: Webhook সেটআপ ---
+# --- ৭. FastAPI Lifespan: Webhook সেটআপ ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Bot অ্যাপ্লিকেশন তৈরি
@@ -316,20 +310,23 @@ async def lifespan(app: FastAPI):
     # বট ইনিশিয়ালাইজ করুন
     await ptb_app.initialize()
     
+    # ✅ app.state-এ সংরক্ষণ করুন (সঠিক পদ্ধতি)
+    app.state.ptb_app = ptb_app
+    app.state.bot = bot
+    
     # Webhook সেটআপ
     webhook_url = f"{RENDER_EXTERNAL_URL}/telegram-webhook"
     await bot.set_webhook(url=webhook_url, secret_token=SECRET_TOKEN)
     logger.info(f"✅ Webhook set to: {webhook_url}")
     
-    # Lifespan state-এ ptb_app ও bot সংরক্ষণ করুন
-    yield {'ptb_app': ptb_app, 'bot': bot}
+    yield  # ✅ শুধু yield, কোনো ডিকশনারি নয়
     
     # ক্লিনআপ: Webhook সরান ও বট শাটডাউন করুন
     await bot.delete_webhook()
     await ptb_app.shutdown()
     logger.info("👋 Bot shutdown complete")
 
-# --- 8. FastAPI অ্যাপ ---
+# --- ৮. FastAPI অ্যাপ ---
 app = FastAPI(lifespan=lifespan)
 
 @app.post("/telegram-webhook")
@@ -338,9 +335,12 @@ async def telegram_webhook(request: Request):
     if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != SECRET_TOKEN:
         return Response(status_code=403)
     
+    # ✅ app.state থেকে ptb_app ও bot নিন (সঠিক পদ্ধতি)
     ptb_app = request.app.state.ptb_app
+    bot = request.app.state.bot
+    
     data = await request.json()
-    update = Update.de_json(data, ptb_app.bot)
+    update = Update.de_json(data, bot)
     
     asyncio.create_task(ptb_app.process_update(update))
     return Response(status_code=200)
@@ -349,8 +349,7 @@ async def telegram_webhook(request: Request):
 async def health():
     return {"status": "ok", "model": "Gemma 4 E2B via Hugging Face API"}
 
-# আপনার সব Handler এবং Lifespan শেষে এই অংশটি যোগ করুন
-
+# --- ৯. মেইন এন্ট্রি পয়েন্ট ---
 if __name__ == "__main__":
     import uvicorn
     import os
@@ -359,9 +358,9 @@ if __name__ == "__main__":
     print(f"Starting server on 0.0.0.0:{port}")
     
     uvicorn.run(
-        "main:app",
+        app,  # ✅ স্ট্রিং নয়, সরাসরি app অবজেক্ট
         host="0.0.0.0",
         port=port,
-        reload=False,  # Render প্রোডাকশনে reload=False রাখবেন
+        reload=False,
         log_level="info"
     )
