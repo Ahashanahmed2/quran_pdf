@@ -10,6 +10,6 @@ transformers==4.40.0
 huggingface-hub==0.26.2
 accelerate==0.27.2
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.2+cpu
-torchvision==0.17.2+cpu
-torchaudio==2.2.2+cpu
+torch==2.9.0+cpu
+torchvision==0.20.0+cpu
+torchaudio==2.4.0+cpu
