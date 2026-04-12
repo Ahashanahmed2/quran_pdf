@@ -342,7 +342,19 @@ async def telegram_webhook(request: Request):
 async def health():
     return {"status": "ok", "model": "Gemma 4 E2B via Hugging Face API"}
 
-# --- 9. লোকাল রানিং ---
+# আপনার সব Handler এবং Lifespan শেষে এই অংশটি যোগ করুন
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    import os
+    
+    port = int(os.environ.get("PORT", 10000))
+    print(f"Starting server on 0.0.0.0:{port}")
+    
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,  # Render প্রোডাকশনে reload=False রাখবেন
+        log_level="info"
+    )
