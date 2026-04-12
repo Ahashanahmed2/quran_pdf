@@ -49,16 +49,22 @@ except Exception as e:
 # --- ৪. PDF প্রসেসিং ফাংশন ---
 def extract_text_from_pdf_bytes(pdf_bytes):
     """পিডিএফ বাইট থেকে টেক্সট বের করা"""
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    full_text = ""
-    for page_num, page in enumerate(reader.pages):
-        page_text = page.extract_text()
-        if page_text:
-            full_text += f"\n--- Page {page_num + 1} ---\n{page_text}"
-    return full_text
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        full_text = ""
+        for page_num, page in enumerate(reader.pages):
+            page_text = page.extract_text()
+            if page_text:
+                full_text += f"\n--- Page {page_num + 1} ---\n{page_text}"
+        return full_text
+    except Exception as e:
+        logger.error(f"PDF এক্সট্র্যাক্ট ত্রুটি: {e}")
+        raise
 
 def chunk_text(text, chunk_size=500):
     """টেক্সটকে ৫০০ শব্দের খণ্ডে ভাগ করা"""
+    if not text:
+        return []
     words = text.split()
     chunks = []
     current_chunk = []
@@ -67,7 +73,8 @@ def chunk_text(text, chunk_size=500):
     for word in words:
         current_length += len(word) + 1
         if current_length > chunk_size:
-            chunks.append(' '.join(current_chunk))
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
             current_chunk = [word]
             current_length = len(word)
         else:
@@ -87,12 +94,12 @@ def save_to_pinecone(filename, chunks):
     for i, chunk in enumerate(chunks):
         embedding = embedding_model.encode(chunk).tolist()
         vectors.append({
-            "id": f"{filename}_chunk_{i}",
+            "id": f"{filename.replace('.', '_')}_chunk_{i}",
             "values": embedding,
             "metadata": {
                 "filename": filename,
                 "chunk_index": i,
-                "text": chunk
+                "text": chunk[:1000]  # টেক্সট সীমিত রাখা
             }
         })
     
@@ -108,23 +115,27 @@ def search_in_pinecone(query, top_k=3):
     if index is None or embedding_model is None:
         return []
     
-    query_embedding = embedding_model.encode(query).tolist()
-    results = index.query(
-        vector=query_embedding,
-        top_k=top_k,
-        include_metadata=True
-    )
-    
-    chunks = []
-    for match in results.matches:
-        if match.score > 0.3:
-            chunks.append({
-                "text": match.metadata["text"],
-                "filename": match.metadata["filename"],
-                "score": match.score
-            })
-    
-    return chunks
+    try:
+        query_embedding = embedding_model.encode(query).tolist()
+        results = index.query(
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True
+        )
+        
+        chunks = []
+        for match in results.matches:
+            if match.score > 0.3:
+                chunks.append({
+                    "text": match.metadata["text"],
+                    "filename": match.metadata["filename"],
+                    "score": match.score
+                })
+        
+        return chunks
+    except Exception as e:
+        logger.error(f"Pinecone সার্চ ত্রুটি: {e}")
+        return []
 
 def generate_answer_with_gemma(question, context_chunks):
     """Hugging Face Inference API ব্যবহার করে Gemma দিয়ে উত্তর জেনারেট করা"""
@@ -135,7 +146,7 @@ def generate_answer_with_gemma(question, context_chunks):
     if not HF_API_KEY:
         return "⚠️ HF_API_KEY সেট করা নেই।"
     
-    context_text = "\n\n---\n\n".join([f"[উৎস: {c['filename']}]\n{c['text']}" for c in context_chunks])
+    context_text = "\n\n---\n\n".join([f"[উৎস: {c['filename']}]\n{c['text'][:500]}" for c in context_chunks])
     
     prompt = f"""<|turn|>system
 তুমি একটি সহায়ক AI সহকারী। নিচের প্রসঙ্গ তথ্যের ভিত্তিতে ব্যবহারকারীর প্রশ্নের উত্তর দাও।
@@ -174,9 +185,11 @@ def generate_answer_with_gemma(question, context_chunks):
         elif response.status_code == 503:
             return "⏳ মডেল লোড হচ্ছে, কয়েক সেকেন্ড পর আবার চেষ্টা করুন।"
         else:
+            logger.error(f"HF API ত্রুটি: {response.status_code}")
             return f"❌ HF API ত্রুটি: {response.status_code}"
             
     except Exception as e:
+        logger.error(f"Gemma API ত্রুটি: {e}")
         return f"❌ ত্রুটি: {str(e)}"
 
 # --- ৫. টেলিগ্রাম বট হ্যান্ডলার ---
@@ -205,56 +218,86 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ /file কমান্ড বা সরাসরি PDF ফাইল হ্যান্ডেল করবে """
+    logger.info(f"📂 handle_file_command called")
+    
     if update.message.document:
         document = update.message.document
+        logger.info(f"📄 Document: {document.file_name}, size: {document.file_size} bytes")
+        
         if not document.file_name.endswith('.pdf'):
             await update.message.reply_text("❌ শুধুমাত্র PDF ফাইল সমর্থিত।")
             return
         
-        await update.message.reply_text(f"⏳ '{document.file_name}' প্রক্রিয়াকরণ হচ্ছে...")
+        # ফাইল সাইজ চেক (টেলিগ্রাম বট API লিমিট 20MB)
+        if document.file_size > 20 * 1024 * 1024:
+            await update.message.reply_text("❌ ফাইল সাইজ 20MB-এর বেশি। ছোট PDF পাঠান।")
+            return
+        
+        status_msg = await update.message.reply_text(f"⏳ '{document.file_name}' ডাউনলোড হচ্ছে...")
         
         try:
+            # ফাইল ডাউনলোড
             file = await context.bot.get_file(document.file_id)
             pdf_bytes = await file.download_as_bytearray()
+            logger.info(f"📥 Downloaded {len(pdf_bytes)} bytes")
             
+            await status_msg.edit_text(f"⏳ টেক্সট এক্সট্র্যাক্ট হচ্ছে...")
+            
+            # টেক্সট এক্সট্র্যাক্ট
             full_text = extract_text_from_pdf_bytes(pdf_bytes)
-            chunks = chunk_text(full_text)
+            logger.info(f"📝 Extracted {len(full_text)} characters")
             
-            if not chunks:
-                await update.message.reply_text("❌ PDF থেকে কোনো টেক্সট পাওয়া যায়নি।")
+            if not full_text.strip():
+                await status_msg.edit_text("❌ PDF থেকে কোনো টেক্সট পাওয়া যায়নি।")
                 return
             
-            vector_count = save_to_pinecone(document.file_name, chunks)
+            # চাঙ্কিং
+            chunks = chunk_text(full_text)
+            logger.info(f"🔹 Created {len(chunks)} chunks")
             
-            await update.message.reply_text(
+            if not chunks:
+                await status_msg.edit_text("❌ টেক্সট খণ্ড তৈরি করা যায়নি।")
+                return
+            
+            # Pinecone-এ সেভ
+            await status_msg.edit_text(f"⏳ Pinecone-এ সংরক্ষণ হচ্ছে...")
+            vector_count = save_to_pinecone(document.file_name, chunks)
+            logger.info(f"💾 Saved {vector_count} vectors to Pinecone")
+            
+            await status_msg.edit_text(
                 f"✅ **'{document.file_name}'** সফলভাবে সংরক্ষিত!\n"
-                f"📄 খণ্ড: {len(chunks)}\n"
+                f"📄 টেক্সট খণ্ড: {len(chunks)}\n"
                 f"🗄️ ভেক্টর: {vector_count}",
                 parse_mode="Markdown"
             )
             
         except Exception as e:
-            await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
+            logger.error(f"❌ PDF প্রসেসিং ত্রুটি: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
     else:
+        logger.info(f"📎 No document in message")
         await update.message.reply_text("📎 দয়া করে একটি PDF ফাইল পাঠান।")
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ যেকোনো টেক্সট মেসেজকে প্রশ্ন হিসেবে গণ্য করে """
     user_question = update.message.text
+    logger.info(f"❓ Question: {user_question[:50]}...")
     
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     try:
         results = search_in_pinecone(user_question, top_k=3)
+        logger.info(f"🔍 Found {len(results)} results")
         
         if not results:
-            await update.message.reply_text("❌ কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি।")
+            await update.message.reply_text("❌ কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি। দয়া করে আগে PDF আপলোড করুন।")
             return
         
         answer = generate_answer_with_gemma(user_question, results)
         await update.message.reply_text(answer, parse_mode="Markdown")
         
     except Exception as e:
+        logger.error(f"প্রশ্ন প্রসেসিং ত্রুটি: {e}")
         await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
