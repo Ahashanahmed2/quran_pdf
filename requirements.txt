@@ -11,5 +11,3 @@ huggingface-hub==0.26.2
 accelerate==0.27.2
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.9.0+cpu
-torchvision==0.20.0+cpu
-torchaudio==2.4.0+cpu
