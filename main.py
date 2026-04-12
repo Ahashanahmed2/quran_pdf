@@ -296,12 +296,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode="Markdown")
 
 # --- 7. FastAPI Lifespan: Webhook সেটআপ ---
+# --- 7. FastAPI Lifespan: Webhook সেটআপ ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Bot অ্যাপ্লিকেশন তৈরি
     request = HTTPXRequest(connection_pool_size=10, read_timeout=60, write_timeout=60)
     bot = Bot(token=TELEGRAM_TOKEN, request=request)
-    ptb_app = Application.builder().token(TELEGRAM_TOKEN).bot(bot).build()
+    
+    # ✅ সঠিক পদ্ধতি: তৈরি করা bot অবজেক্টটি ব্যবহার করুন
+    ptb_app = Application.builder().bot(bot).build()
     
     # হ্যান্ডলার যুক্ত করুন
     ptb_app.add_handler(CommandHandler("start", start))
@@ -309,6 +312,8 @@ async def lifespan(app: FastAPI):
     ptb_app.add_handler(CommandHandler("list", list_files))
     ptb_app.add_handler(CommandHandler("status", status))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_question))
+    
+    # বট ইনিশিয়ালাইজ করুন
     await ptb_app.initialize()
     
     # Webhook সেটআপ
@@ -316,11 +321,13 @@ async def lifespan(app: FastAPI):
     await bot.set_webhook(url=webhook_url, secret_token=SECRET_TOKEN)
     logger.info(f"✅ Webhook set to: {webhook_url}")
     
+    # Lifespan state-এ ptb_app ও bot সংরক্ষণ করুন
     yield {'ptb_app': ptb_app, 'bot': bot}
     
-    # ক্লিনআপ
+    # ক্লিনআপ: Webhook সরান ও বট শাটডাউন করুন
     await bot.delete_webhook()
     await ptb_app.shutdown()
+    logger.info("👋 Bot shutdown complete")
 
 # --- 8. FastAPI অ্যাপ ---
 app = FastAPI(lifespan=lifespan)
