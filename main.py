@@ -17,15 +17,15 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- ২. কনফিগারেশন ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8613624366:AAHWX_Y_7bH5V8Mw4hfUQ0nfPaGrfZ-ROgw")
-PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "pcsk_7XHfjD_Ekff9WkF5MPke5mUwFTQ24ctf45NnvbWDXXQEozdEf8aHHHNRgH4PzpfHDwRZqE")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "YOUR_PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quran-pdf-index")
 HF_API_KEY = os.environ.get("HF_API_KEY", "")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-2.onrender.com")
 SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "my_super_secret_token_2026")
 
 # Hugging Face Inference API কনফিগ
-HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-2-2b-it"
+HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-4-it"
 HF_HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"} if HF_API_KEY else {}
 
 # --- ৩. Pinecone ও এম্বেডিং মডেল সেটআপ ---
@@ -48,7 +48,6 @@ except Exception as e:
 
 # --- ৪. PDF প্রসেসিং ফাংশন ---
 def extract_text_from_pdf_bytes(pdf_bytes):
-    """পিডিএফ বাইট থেকে টেক্সট বের করা"""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         full_text = ""
@@ -62,7 +61,6 @@ def extract_text_from_pdf_bytes(pdf_bytes):
         raise
 
 def chunk_text(text, chunk_size=500):
-    """টেক্সটকে ৫০০ শব্দের খণ্ডে ভাগ করা"""
     if not text:
         return []
     words = text.split()
@@ -86,7 +84,6 @@ def chunk_text(text, chunk_size=500):
     return chunks
 
 def save_to_pinecone(filename, chunks):
-    """টেক্সট খণ্ডগুলো এম্বেড করে Pinecone-এ সংরক্ষণ"""
     if index is None or embedding_model is None:
         raise Exception("Pinecone বা এম্বেডিং মডেল লোড হয়নি")
     
@@ -111,7 +108,6 @@ def save_to_pinecone(filename, chunks):
     return len(vectors)
 
 def search_in_pinecone(query, top_k=3):
-    """Pinecone-এ প্রশ্নের প্রাসঙ্গিক তথ্য খোঁজা"""
     if index is None or embedding_model is None:
         return []
     
@@ -138,8 +134,6 @@ def search_in_pinecone(query, top_k=3):
         return []
 
 def generate_answer_with_gemma(question, context_chunks):
-    """Hugging Face Inference API ব্যবহার করে Gemma দিয়ে উত্তর জেনারেট করা"""
-    
     if not context_chunks:
         return "❌ কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি। দয়া করে আগে PDF আপলোড করুন।"
     
@@ -195,30 +189,26 @@ def generate_answer_with_gemma(question, context_chunks):
 # --- ৫. টেলিগ্রাম বট হ্যান্ডলার ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 **Quran PDF Bot**\n\n"
+        "🤖 Quran PDF Bot\n\n"
         "/help - সকল কমান্ড দেখুন\n"
-        "/status - সিস্টেম স্ট্যাটাস",
-        parse_mode="Markdown"
+        "/status - সিস্টেম স্ট্যাটাস"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-**উপলব্ধ কমান্ডসমূহ:**
-
-/start - বট চালু করুন
-/help - এই সাহায্য বার্তা
-/file - PDF আপলোড করুন
-/list - সংরক্ষিত PDF-র তালিকা
-/status - সিস্টেম স্ট্যাটাস
-
-**PDF আপলোড:** `/file` লিখে PDF পাঠান
-**প্রশ্ন:** সরাসরি প্রশ্ন লিখুন
-"""
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    help_text = (
+        "উপলব্ধ কমান্ডসমূহ:\n\n"
+        "/start - বট চালু করুন\n"
+        "/help - এই সাহায্য বার্তা\n"
+        "/file - PDF আপলোড করুন\n"
+        "/list - সংরক্ষিত PDF-র তালিকা\n"
+        "/status - সিস্টেম স্ট্যাটাস\n\n"
+        "PDF আপলোড: /file লিখে PDF পাঠান\n"
+        "প্রশ্ন: সরাসরি প্রশ্ন লিখুন"
+    )
+    await update.message.reply_text(help_text)
 
 async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ /file কমান্ড বা সরাসরি PDF ফাইল হ্যান্ডেল করবে """
-    logger.info(f"📂 handle_file_command called")
+    logger.info("📂 handle_file_command called")
     
     if update.message.document:
         document = update.message.document
@@ -231,14 +221,12 @@ async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         status_msg = await update.message.reply_text(f"⏳ '{document.file_name}' ডাউনলোড হচ্ছে...")
         
         try:
-            # ফাইল ডাউনলোড
             file = await context.bot.get_file(document.file_id)
             pdf_bytes = await file.download_as_bytearray()
             logger.info(f"📥 Downloaded {len(pdf_bytes)} bytes")
             
-            await status_msg.edit_text(f"⏳ টেক্সট এক্সট্র্যাক্ট হচ্ছে...")
+            await status_msg.edit_text("⏳ টেক্সট এক্সট্র্যাক্ট হচ্ছে...")
             
-            # টেক্সট এক্সট্র্যাক্ট
             full_text = extract_text_from_pdf_bytes(pdf_bytes)
             logger.info(f"📝 Extracted {len(full_text)} characters")
             
@@ -246,7 +234,6 @@ async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ PDF থেকে কোনো টেক্সট পাওয়া যায়নি।")
                 return
             
-            # চাঙ্কিং
             chunks = chunk_text(full_text)
             logger.info(f"🔹 Created {len(chunks)} chunks")
             
@@ -254,16 +241,14 @@ async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await status_msg.edit_text("❌ টেক্সট খণ্ড তৈরি করা যায়নি।")
                 return
             
-            # Pinecone-এ সেভ
-            await status_msg.edit_text(f"⏳ Pinecone-এ সংরক্ষণ হচ্ছে...")
+            await status_msg.edit_text("⏳ Pinecone-এ সংরক্ষণ হচ্ছে...")
             vector_count = save_to_pinecone(document.file_name, chunks)
             logger.info(f"💾 Saved {vector_count} vectors to Pinecone")
             
             await status_msg.edit_text(
-                f"✅ **'{document.file_name}'** সফলভাবে সংরক্ষিত!\n"
+                f"✅ '{document.file_name}' সফলভাবে সংরক্ষিত!\n"
                 f"📄 টেক্সট খণ্ড: {len(chunks)}\n"
-                f"🗄️ ভেক্টর: {vector_count}",
-                parse_mode="Markdown"
+                f"🗄️ ভেক্টর: {vector_count}"
             )
             
         except Exception as e:
@@ -273,7 +258,6 @@ async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("📎 দয়া করে একটি PDF ফাইল পাঠান।")
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ যেকোনো টেক্সট মেসেজকে প্রশ্ন হিসেবে গণ্য করে """
     user_question = update.message.text
     logger.info(f"❓ Question: {user_question[:50]}...")
     
@@ -288,14 +272,13 @@ async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         
         answer = generate_answer_with_gemma(user_question, results)
-        await update.message.reply_text(answer, parse_mode="Markdown")
+        await update.message.reply_text(answer)
         
     except Exception as e:
         logger.error(f"প্রশ্ন প্রসেসিং ত্রুটি: {e}")
         await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ Pinecone-এ সংরক্ষিত ফাইলের তালিকা """
     try:
         if index is None:
             await update.message.reply_text("❌ Pinecone সংযুক্ত নয়")
@@ -314,7 +297,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if filenames:
             file_list = "\n".join([f"• {f}" for f in sorted(filenames)])
-            await update.message.reply_text(f"📁 **সংরক্ষিত PDF:**\n{file_list}", parse_mode="Markdown")
+            await update.message.reply_text(f"সংরক্ষিত PDF:\n{file_list}")
         else:
             await update.message.reply_text("ℹ️ এখনো কোনো PDF সংরক্ষিত হয়নি।")
             
@@ -322,21 +305,19 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ সিস্টেম স্ট্যাটাস """
     hf_status = "✅" if HF_API_KEY else "❌"
     pc_status = "✅" if index is not None else "❌"
-    status_text = f"""
-**সিস্টেম স্ট্যাটাস**
-Pinecone: {pc_status}
-HF API: {hf_status}
-"""
-    await update.message.reply_text(status_text, parse_mode="Markdown")
+    status_text = (
+        f"সিস্টেম স্ট্যাটাস\n"
+        f"Pinecone: {pc_status}\n"
+        f"HF API: {hf_status}"
+    )
+    await update.message.reply_text(status_text)
 
-# --- ৬. FastAPI Lifespan (বর্ধিত টাইমআউট সহ) ---
+# --- ৬. FastAPI Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # বড় ফাইলের জন্য টাইমআউট বাড়ানো হয়েছে (১২০ সেকেন্ড)
-    request = HTTPXRequest(connection_pool_size=10, read_timeout=120, write_timeout=120, connect_timeout=30)
+    request = HTTPXRequest(connection_pool_size=10, read_timeout=120, write_timeout=120)
     bot = Bot(token=TELEGRAM_TOKEN, request=request)
     
     ptb_app = Application.builder().bot(bot).build()
