@@ -362,8 +362,8 @@ async def ping():
 
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
-    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != SECRET_TOKEN:
-        return Response(status_code=403)
+    #if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != SECRET_TOKEN:
+        #return Response(status_code=403)
 
     ptb_app = request.app.state.ptb_app
     bot = request.app.state.bot
