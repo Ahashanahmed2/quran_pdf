@@ -121,7 +121,7 @@ def search_in_pinecone(query, top_k=3):
 
         chunks = []
         for match in results.matches:
-            if match.score > 0.3:
+            if match.score > 0.05:
                 chunks.append({
                     "text": match.metadata["text"],
                     "filename": match.metadata["filename"],
