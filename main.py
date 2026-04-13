@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 # --- ২. কনফিগারেশন ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8613624366:AAHWX_Y_7bH5V8Mw4hfUQ0nfPaGrfZ-ROgw")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "pcsk_7XHfjD_Ekff9WkF5MPke5mUwFTQ24ctf45NnvbWDXXQEozdEf8aHHHNRgH4PzpfHDwRZqE")
-PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quran-pdf-index")
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quranqpf")
 HF_API_KEY = os.environ.get("HF_API_KEY", "")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-2.onrender.com")
 SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "asdFGH")
 
 # Hugging Face Inference API কনফিগ
-HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-2-it"
+HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-2b-it"
 HF_HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"} if HF_API_KEY else {}
 
 # --- ৩. Pinecone ও এম্বেডিং মডেল সেটআপ ---
