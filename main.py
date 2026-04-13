@@ -25,7 +25,7 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-2
 SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "my_super_secret_token_2026")
 
 # Hugging Face Inference API কনফিগ
-HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-4-it"
+HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-2-2b-it"
 HF_HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"} if HF_API_KEY else {}
 
 # --- ৩. Pinecone ও এম্বেডিং মডেল সেটআপ ---
