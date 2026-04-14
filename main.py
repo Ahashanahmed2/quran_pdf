@@ -63,8 +63,8 @@ HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
 
 # ✅ OCR কনফিগারেশন
 OCR_DPI = 300
-OCR_LANG_PRIMARY = "ben+eng"
-OCR_LANG_FALLBACK = "eng"
+OCR_LANG_PRIMARY = "ben+ara"
+#OCR_LANG_FALLBACK = "eng"
 
 # ✅ Worker Queue System
 pdf_processing_queue = None
