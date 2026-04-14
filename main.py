@@ -517,12 +517,11 @@ def format_search_results(results, query):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>🤖 Quran PDF Bot</b>\n\n"
+        "🤖 Quran PDF Bot\n\n"
         "/help - সকল কমান্ড দেখুন\n"
         "/status - সিস্টেম স্ট্যাটাস\n"
         "/list - সংরক্ষিত PDF-র তালিকা\n\n"
-        "✨ Google Drive লিংক দিন বড় PDF আপলোড করতে!",
-        parse_mode="HTML"
+        "✨ Google Drive লিংক দিন বড় PDF আপলোড করতে!"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -538,9 +537,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. লিংকটি এখানে পেস্ট করুন\n\n"
         "প্রশ্ন: সরাসরি প্রশ্ন লিখুন"
     )
-    await update.message.reply_text(help_text)  # parse_mode সরানো হয়েছে
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
+    await update.message.reply_text(help_text)
 async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder_id):
     status_msg = await update.message.reply_text("📁 ফোল্ডার স্ক্যান করা হচ্ছে...")
     files = get_file_list_from_folder(folder_id)
@@ -702,9 +699,6 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🙏 অনুগ্রহ করে অপেক্ষা করুন..."
     )
 
-    # ✅ ব্যাকগ্রাউন্ডে প্রসেসিং শুরু
-    asyncio.create_task(process_pdf_background(folder_id, update, context))
-    
     # ✅ ব্যাকগ্রাউন্ডে প্রসেসিং শুরু
     asyncio.create_task(process_pdf_background(folder_id, update, context))
 
