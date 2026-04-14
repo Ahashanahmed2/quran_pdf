@@ -450,84 +450,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text)
 
-async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Google Drive লিংক থেকে PDF ডাউনলোড ও প্রক্রিয়াকরণ"""
-    url = update.message.text
-    
-    if 'drive.google.com' not in url:
-        return
-    
-    folder_id, url_type = extract_folder_id_from_url(url)
-    
-    if not folder_id:
-        await update.message.reply_text("❌ অবৈধ Google Drive লিংক।")
-        return
-    
-    if url_type == 'folder':
-        await handle_drive_folder(update, context, folder_id)
-        return
-    
-    status_msg = await update.message.reply_text("⏳ Google Drive থেকে PDF ডাউনলোড করা হচ্ছে...")
-    
-    try:
-        download_url = f"https://drive.google.com/uc?export=download&id={folder_id}"
-        response = requests.get(download_url, timeout=120)
-        
-        if response.status_code != 200:
-            await status_msg.edit_text(f"❌ ডাউনলোড ব্যর্থ: {response.status_code}")
-            return
-        
-        pdf_bytes = response.content
-        file_hash = get_file_hash(pdf_bytes)
-        
-        # ডুপ্লিকেট চেক
-        duplicate = check_file_already_uploaded(file_hash)
-        if duplicate['exists']:
-            await status_msg.edit_text(
-                f"⚠️ **এই ফাইলটি আগেই আপলোড করা হয়েছে!**\n\n"
-                f"📅 আগের আপলোড: {duplicate['date']}\n"
-                f"🔗 Archive.org: {duplicate['archive_url']}"
-            )
-            return
-        
-        filename = f"drive_{file_hash[:8]}.pdf"
-        size_mb = len(pdf_bytes) / 1024 / 1024
-        
-        await status_msg.edit_text(f"✅ ডাউনলোড সম্পন্ন ({size_mb:.2f} MB)৷\n⏳ Archive.org-এ আপলোড করা হচ্ছে...")
-        
-        # Archive.org আপলোড
-        archive_result = upload_to_archive(pdf_bytes, filename)
-        archive_url = archive_result.get('url') if archive_result['success'] else None
-        
-        await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
-        
-        # Pinecone প্রক্রিয়াকরণ
-        structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
-        chunks = create_structured_chunks(structured_pages, filename)
-        vector_count = save_structured_to_pinecone(filename, chunks)
-        
-        total_pages = len(structured_pages)
-        total_headlines = sum(len(p['headlines']) for p in structured_pages)
-        total_paras = sum(len(p['paragraphs']) for p in structured_pages)
-        
-        # HF-এ রেকর্ড সংরক্ষণ
-        mark_file_as_uploaded(filename, file_hash, archive_url, total_pages, vector_count, size_mb)
-        
-        final_msg = f"✅ **সফলভাবে সংরক্ষিত!**\n\n"
-        final_msg += f"📄 পৃষ্ঠা: {total_pages}\n"
-        final_msg += f"📌 হেডলাইন: {total_headlines}\n"
-        final_msg += f"📝 প্যারাগ্রাফ: {total_paras}\n"
-        final_msg += f"🗄️ ভেক্টর: {vector_count}\n"
-        final_msg += f"📊 আকার: {size_mb:.2f} MB\n"
-        
-        if archive_url:
-            final_msg += f"\n📚 **Archive.org:** {archive_url}"
-        
-        await status_msg.edit_text(final_msg)
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
-
 async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder_id):
     """Google Drive ফোল্ডার প্রক্রিয়াকরণ"""
     status_msg = await update.message.reply_text("📁 ফোল্ডার স্ক্যান করা হচ্ছে...")
@@ -542,7 +464,6 @@ async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE
     duplicate_files = []
     
     for file in files:
-        # দ্রুত চেক - ফাইলের নাম দিয়ে
         temp_hash = hashlib.md5(f"{file['name']}_{file.get('size', '')}".encode()).hexdigest()
         if check_file_already_uploaded(temp_hash)['exists']:
             duplicate_files.append(file)
@@ -564,11 +485,11 @@ async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if not new_files:
         report += "ℹ️ প্রক্রিয়াকরণের জন্য কোনো নতুন ফাইল নেই।"
-        await status_msg.edit_text(report)
+        await status_msg.edit_text(report, parse_mode="Markdown")
         return
     
     report += f"⏳ {len(new_files)}টি নতুন ফাইল প্রক্রিয়াকরণ শুরু..."
-    await status_msg.edit_text(report)
+    await status_msg.edit_text(report, parse_mode="Markdown")
     
     processed = 0
     failed = 0
@@ -606,12 +527,99 @@ async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE
     final_report += f"✅ সফল: {processed}টি\n"
     final_report += f"❌ ব্যর্থ: {failed}টি"
     
-    await update.message.reply_text(final_report)
+    await update.message.reply_text(final_report, parse_mode="Markdown")
+
+async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Google Drive লিংক থেকে PDF ডাউনলোড ও প্রক্রিয়াকরণ"""
+    url = update.message.text
+    logger.info(f"🚀 handle_drive_link started with URL: {url}")
+    
+    if 'drive.google.com' not in url:
+        logger.warning("Not a Drive URL")
+        return
+    
+    folder_id, url_type = extract_folder_id_from_url(url)
+    logger.info(f"📁 Folder ID: {folder_id}, Type: {url_type}")
+    
+    if not folder_id:
+        await update.message.reply_text("❌ অবৈধ Google Drive লিংক।")
+        return
+    
+    if url_type == 'folder':
+        await handle_drive_folder(update, context, folder_id)
+        return
+    
+    status_msg = await update.message.reply_text("⏳ Google Drive থেকে PDF ডাউনলোড করা হচ্ছে...")
+    logger.info("📥 Starting download...")
+    
+    try:
+        download_url = f"https://drive.google.com/uc?export=download&id={folder_id}"
+        response = requests.get(download_url, timeout=120)
+        
+        if response.status_code != 200:
+            await status_msg.edit_text(f"❌ ডাউনলোড ব্যর্থ: {response.status_code}")
+            return
+        
+        pdf_bytes = response.content
+        file_hash = get_file_hash(pdf_bytes)
+        logger.info(f"📥 Downloaded {len(pdf_bytes)} bytes, hash: {file_hash[:16]}")
+        
+        duplicate = check_file_already_uploaded(file_hash)
+        if duplicate['exists']:
+            await status_msg.edit_text(
+                f"⚠️ **এই ফাইলটি আগেই আপলোড করা হয়েছে!**\n\n"
+                f"📅 আগের আপলোড: {duplicate['date']}\n"
+                f"🔗 Archive.org: {duplicate['archive_url']}",
+                parse_mode="Markdown"
+            )
+            return
+        
+        filename = f"drive_{file_hash[:8]}.pdf"
+        size_mb = len(pdf_bytes) / 1024 / 1024
+        
+        await status_msg.edit_text(f"✅ ডাউনলোড সম্পন্ন ({size_mb:.2f} MB)৷\n⏳ Archive.org-এ আপলোড করা হচ্ছে...")
+        logger.info("📤 Uploading to Archive.org...")
+        
+        archive_result = upload_to_archive(pdf_bytes, filename)
+        archive_url = archive_result.get('url') if archive_result['success'] else None
+        
+        await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
+        logger.info("📊 Processing PDF...")
+        
+        structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
+        chunks = create_structured_chunks(structured_pages, filename)
+        vector_count = save_structured_to_pinecone(filename, chunks)
+        
+        total_pages = len(structured_pages)
+        total_headlines = sum(len(p['headlines']) for p in structured_pages)
+        total_paras = sum(len(p['paragraphs']) for p in structured_pages)
+        
+        mark_file_as_uploaded(filename, file_hash, archive_url, total_pages, vector_count, size_mb)
+        logger.info(f"✅ File processed: {total_pages} pages, {vector_count} vectors")
+        
+        final_msg = f"✅ **সফলভাবে সংরক্ষিত!**\n\n"
+        final_msg += f"📄 পৃষ্ঠা: {total_pages}\n"
+        final_msg += f"📌 হেডলাইন: {total_headlines}\n"
+        final_msg += f"📝 প্যারাগ্রাফ: {total_paras}\n"
+        final_msg += f"🗄️ ভেক্টর: {vector_count}\n"
+        final_msg += f"📊 আকার: {size_mb:.2f} MB\n"
+        
+        if archive_url:
+            final_msg += f"\n📚 **Archive.org:** {archive_url}"
+        
+        await status_msg.edit_text(final_msg, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"❌ Drive link error: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_question = update.message.text
+    logger.info(f"📨 Received message: {user_question[:100]}...")
     
+    # ✅ Google Drive লিংক চেক (প্রথমেই)
     if 'drive.google.com' in user_question:
+        logger.info("🔗 Google Drive link detected, forwarding to handler...")
         await handle_drive_link(update, context)
         return
     
@@ -621,7 +629,7 @@ async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         results = search_in_pinecone_advanced(user_question, top_k=5)
         formatted_answer = format_search_results(results, user_question)
-        await update.message.reply_text(formatted_answer)
+        await update.message.reply_text(formatted_answer, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
 
@@ -650,7 +658,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_list += f"\n📁 **{filename}**\n"
                 file_list += f"   📄 পৃষ্ঠা: {len(stats['pages'])}\n"
                 file_list += f"   🗄️ ভেক্টর: {stats['vectors']}\n"
-            await update.message.reply_text(f"**সংরক্ষিত PDF:**\n{file_list}")
+            await update.message.reply_text(f"**সংরক্ষিত PDF:**\n{file_list}", parse_mode="Markdown")
         else:
             await update.message.reply_text("ℹ️ এখনো কোনো PDF সংরক্ষিত হয়নি।")
     except Exception as e:
@@ -668,7 +676,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔍 HF Tracking: {hf_status}\n"
         f"📁 ইনডেক্স: {PINECONE_INDEX_NAME}"
     )
-    await update.message.reply_text(status_text)
+    await update.message.reply_text(status_text, parse_mode="Markdown")
 
 # --- ১১. FastAPI Lifespan ---
 @asynccontextmanager
