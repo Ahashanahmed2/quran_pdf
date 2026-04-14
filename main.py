@@ -5,6 +5,7 @@ import re
 import json
 import hashlib
 import requests
+import gc  # ✅ মেমোরি ক্লিয়ার করার জন্য
 from datetime import datetime
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, parse_qs
@@ -16,7 +17,7 @@ from pypdf import PdfReader
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import HfApi, login, hf_hub_download
-from internetarchive import configure, upload, search_items
+from internetarchive import configure, upload
 import logging
 
 # --- ১. লগিং সেটআপ ---
@@ -235,7 +236,7 @@ def get_file_list_from_folder(folder_id):
     
     return files
 
-# --- ৯. PDF প্রসেসিং ফাংশন ---
+# --- ৯. PDF প্রসেসিং ফাংশন (ব্যাচ প্রসেসিং সহ) ---
 
 def detect_headlines(page_text):
     """পৃষ্ঠা থেকে হেডলাইন ডিটেক্ট করা"""
@@ -273,76 +274,100 @@ def extract_paragraphs(page_text):
             paragraphs.append(para)
     return paragraphs
 
-def extract_text_from_pdf_bytes_advanced(pdf_bytes):
-    """পিডিএফ থেকে টেক্সট, পৃষ্ঠা নম্বর, হেডলাইন ও প্যারাগ্রাফ সহ বের করা"""
+def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
+    """পিডিএফ থেকে টেক্সট ব্যাচে ব্যাচে এক্সট্র্যাক্ট করা (মেমোরি অপ্টিমাইজড)"""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
         structured_pages = []
         
-        for page_num, page in enumerate(reader.pages, 1):
-            page_text = page.extract_text()
-            if not page_text or not page_text.strip():
-                continue
-            
-            headlines = detect_headlines(page_text)
-            paragraphs = extract_paragraphs(page_text)
-            
-            structured_pages.append({
-                'page_number': page_num,
-                'headlines': headlines,
-                'paragraphs': paragraphs,
-                'full_text': page_text
-            })
-            
-            logger.info(f"   📄 Page {page_num}: {len(headlines)} headlines, {len(paragraphs)} paragraphs")
+        logger.info(f"📚 Total pages: {total_pages}, processing in batches of {batch_size}")
         
+        for batch_start in range(0, total_pages, batch_size):
+            batch_end = min(batch_start + batch_size, total_pages)
+            logger.info(f"📦 Processing batch: pages {batch_start+1}-{batch_end} of {total_pages}")
+            
+            for page_num in range(batch_start, batch_end):
+                page = reader.pages[page_num]
+                page_text = page.extract_text()
+                if not page_text or not page_text.strip():
+                    continue
+                
+                headlines = detect_headlines(page_text)
+                paragraphs = extract_paragraphs(page_text)
+                
+                structured_pages.append({
+                    'page_number': page_num + 1,
+                    'headlines': headlines,
+                    'paragraphs': paragraphs,
+                    'full_text': page_text
+                })
+                
+                if (page_num + 1) % 10 == 0:
+                    logger.info(f"   📄 Page {page_num + 1}: {len(headlines)} headlines, {len(paragraphs)} paragraphs")
+            
+            # প্রতি ব্যাচের পর মেমোরি ক্লিয়ার
+            gc.collect()
+            logger.info(f"   🧹 Memory cleared after batch")
+        
+        logger.info(f"✅ PDF extraction complete: {len(structured_pages)} pages processed")
         return structured_pages
     except Exception as e:
         logger.error(f"PDF এক্সট্র্যাক্ট ত্রুটি: {e}")
         raise
 
 def create_structured_chunks(structured_pages, filename):
-    """স্ট্রাকচার্ড ডেটা থেকে চাঙ্ক তৈরি"""
+    """স্ট্রাকচার্ড ডেটা থেকে চাঙ্ক তৈরি (ব্যাচে ব্যাচে)"""
     chunks = []
+    batch_size = 100
+    total_pages = len(structured_pages)
     
-    for page in structured_pages:
-        page_num = page['page_number']
-        headlines = page['headlines']
-        paragraphs = page['paragraphs']
+    for batch_start in range(0, total_pages, batch_size):
+        batch_end = min(batch_start + batch_size, total_pages)
         
-        for headline in headlines:
-            chunks.append({
-                'text': headline,
-                'metadata': {'page': page_num, 'type': 'headline', 'headline': headline[:100]}
-            })
+        for i in range(batch_start, batch_end):
+            page = structured_pages[i]
+            page_num = page['page_number']
+            headlines = page['headlines']
+            paragraphs = page['paragraphs']
+            
+            for headline in headlines:
+                chunks.append({
+                    'text': headline,
+                    'metadata': {'page': page_num, 'type': 'headline', 'headline': headline[:100]}
+                })
+            
+            for para_num, para_text in enumerate(paragraphs, 1):
+                related_headline = headlines[0] if headlines else "No headline"
+                chunks.append({
+                    'text': para_text,
+                    'metadata': {
+                        'page': page_num, 'type': 'paragraph', 'para_number': para_num,
+                        'headline': related_headline[:100], 'total_paras': len(paragraphs)
+                    }
+                })
+            
+            if page['full_text'].strip():
+                chunks.append({
+                    'text': page['full_text'][:2000],
+                    'metadata': {
+                        'page': page_num, 'type': 'full_page',
+                        'headline': headlines[0][:100] if headlines else "No headline"
+                    }
+                })
         
-        for para_num, para_text in enumerate(paragraphs, 1):
-            related_headline = headlines[0] if headlines else "No headline"
-            chunks.append({
-                'text': para_text,
-                'metadata': {
-                    'page': page_num, 'type': 'paragraph', 'para_number': para_num,
-                    'headline': related_headline[:100], 'total_paras': len(paragraphs)
-                }
-            })
-        
-        if page['full_text'].strip():
-            chunks.append({
-                'text': page['full_text'][:2000],
-                'metadata': {
-                    'page': page_num, 'type': 'full_page',
-                    'headline': headlines[0][:100] if headlines else "No headline"
-                }
-            })
+        gc.collect()
     
     return chunks
 
 def save_structured_to_pinecone(filename, chunks):
-    """স্ট্রাকচার্ড চাঙ্কগুলো Pinecone-এ সংরক্ষণ"""
+    """স্ট্রাকচার্ড চাঙ্কগুলো Pinecone-এ সংরক্ষণ (ব্যাচে ব্যাচে)"""
     if index is None or embedding_model is None:
         raise Exception("Pinecone বা এম্বেডিং মডেল লোড হয়নি")
     
     vectors = []
+    batch_size = 50  # Pinecone আপলোড ব্যাচ
+    
     for i, chunk_data in enumerate(chunks):
         chunk_text = chunk_data['text']
         metadata = chunk_data['metadata']
@@ -357,13 +382,20 @@ def save_structured_to_pinecone(filename, chunks):
             "values": embedding,
             "metadata": full_metadata
         })
+        
+        # প্রতি batch_size ভেক্টর পর পর Pinecone-এ আপলোড
+        if len(vectors) >= batch_size:
+            index.upsert(vectors=vectors)
+            logger.info(f"   📤 Uploaded {len(vectors)} vectors to Pinecone")
+            vectors = []
+            gc.collect()
     
-    batch_size = 100
-    for i in range(0, len(vectors), batch_size):
-        batch = vectors[i:i+batch_size]
-        index.upsert(vectors=batch)
+    # বাকি ভেক্টর আপলোড
+    if vectors:
+        index.upsert(vectors=vectors)
+        logger.info(f"   📤 Uploaded final {len(vectors)} vectors to Pinecone")
     
-    return len(vectors)
+    return len(chunks)
 
 def search_in_pinecone_advanced(query, top_k=5):
     """উন্নত সার্চ - রেজাল্টে পৃষ্ঠা, হেডলাইন, প্যারা নম্বর সহ"""
@@ -448,7 +480,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. লিংকটি এখানে পেস্ট করুন\n\n"
         "**প্রশ্ন:** সরাসরি প্রশ্ন লিখুন"
     )
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder_id):
     """Google Drive ফোল্ডার প্রক্রিয়াকরণ"""
@@ -586,6 +618,7 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
         logger.info("📊 Processing PDF...")
         
+        # ✅ ব্যাচ প্রসেসিং সহ এক্সট্র্যাক্ট
         structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
         chunks = create_structured_chunks(structured_pages, filename)
         vector_count = save_structured_to_pinecone(filename, chunks)
@@ -617,7 +650,6 @@ async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYP
     user_question = update.message.text
     logger.info(f"📨 Received message: {user_question[:100]}...")
     
-    # ✅ Google Drive লিংক চেক (প্রথমেই)
     if 'drive.google.com' in user_question:
         logger.info("🔗 Google Drive link detected, forwarding to handler...")
         await handle_drive_link(update, context)
