@@ -25,7 +25,6 @@ try:
     import pytesseract
     from pdf2image import convert_from_bytes
     OCR_AVAILABLE = True
-    logger_ocr = logging.getLogger(__name__)
 except ImportError:
     OCR_AVAILABLE = False
     print("⚠️ OCR libraries not available. Install: pytesseract, pdf2image")
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8613624366:AAHWX_Y_7bH5V8Mw4hfUQ0nfPaGrfZ-ROgw")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "pcsk_7XHfjD_Ekff9WkF5MPke5mUwFTQ24ctf45NnvbWDXXQEozdEf8aHHHNRgH4PzpfHDwRZqE")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quranqpf")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-2.onrender.com")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-3.onrender.com")
 SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "asdFGH")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 IA_EMAIL = os.environ.get("IA_EMAIL", "")
@@ -156,10 +155,13 @@ def upload_to_archive(pdf_bytes, filename, title=""):
     try:
         file_hash = hashlib.md5(pdf_bytes).hexdigest()[:10]
         
+        # সম্পূর্ণ ফাইলনেম স্যানিটাইজেশন
         safe_filename = re.sub(r'[^\x20-\x7E]', '_', filename)
         safe_filename = re.sub(r'[<>:"/\\|?*]', '_', safe_filename)
         safe_filename = re.sub(r'_+', '_', safe_filename)
         safe_filename = safe_filename.strip('_')
+        safe_filename = safe_filename.replace('\x00', '')
+        
         if not safe_filename or safe_filename == '.pdf':
             safe_filename = f"document_{file_hash}.pdf"
         elif not safe_filename.endswith('.pdf'):
@@ -275,7 +277,6 @@ def extract_paragraphs(page_text):
     return paragraphs
 
 def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
-    """টেক্সট-বেসড PDF থেকে টেক্সট এক্সট্র্যাক্ট"""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
@@ -316,13 +317,12 @@ def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
         raise
 
 def extract_text_from_pdf_bytes_ocr(pdf_bytes, batch_size=10):
-    """OCR ব্যবহার করে স্ক্যান করা PDF থেকে টেক্সট এক্সট্র্যাক্ট"""
     if not OCR_AVAILABLE:
         logger.error("❌ OCR libraries not available")
         return []
     
     try:
-        images = convert_from_bytes(pdf_bytes, dpi=150)  # DPI কমানো হয়েছে মেমোরির জন্য
+        images = convert_from_bytes(pdf_bytes, dpi=150)
         total_pages = len(images)
         structured_pages = []
         
@@ -335,7 +335,6 @@ def extract_text_from_pdf_bytes_ocr(pdf_bytes, batch_size=10):
             for page_num in range(batch_start, batch_end):
                 image = images[page_num]
                 
-                # OCR দিয়ে টেক্সট এক্সট্র্যাক্ট (বাংলা + ইংরেজি)
                 try:
                     page_text = pytesseract.image_to_string(image, lang='ben+eng')
                 except:
@@ -368,16 +367,13 @@ def extract_text_from_pdf_bytes_ocr(pdf_bytes, batch_size=10):
         raise
 
 def extract_text_from_pdf_bytes_auto(pdf_bytes):
-    """অটো-ডিটেক্ট: PDF টেক্সট-বেসড না স্ক্যান করা"""
     try:
-        # প্রথমে টেক্সট-বেসড হিসেবে ট্রাই
         reader = PdfReader(io.BytesIO(pdf_bytes))
         if len(reader.pages) == 0:
             return []
         
         first_page_text = reader.pages[0].extract_text() if len(reader.pages) > 0 else ""
         
-        # যদি প্রথম পৃষ্ঠায় ৫০-এর কম অক্ষর থাকে, তাহলে স্ক্যান করা PDF ধরে OCR ব্যবহার
         if len(first_page_text.strip()) < 50:
             logger.info("📷 Detected scanned PDF, using OCR...")
             if OCR_AVAILABLE:
@@ -620,6 +616,65 @@ async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await update.message.reply_text(final_report, parse_mode="Markdown")
 
+async def process_pdf_background(folder_id, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ব্যাকগ্রাউন্ডে PDF প্রসেসিং - Webhook টাইমআউট এড়াতে"""
+    try:
+        download_url = f"https://drive.google.com/uc?export=download&id={folder_id}"
+        response = requests.get(download_url, timeout=120)
+        
+        if response.status_code != 200:
+            await update.message.reply_text(f"❌ ডাউনলোড ব্যর্থ: {response.status_code}")
+            return
+        
+        pdf_bytes = response.content
+        file_hash = get_file_hash(pdf_bytes)
+        
+        duplicate = check_file_already_uploaded(file_hash)
+        if duplicate['exists']:
+            await update.message.reply_text(
+                f"⚠️ **এই ফাইলটি আগেই আপলোড করা হয়েছে!**\n\n"
+                f"📅 আগের আপলোড: {duplicate['date']}\n"
+                f"🔗 Archive.org: {duplicate['archive_url']}",
+                parse_mode="Markdown"
+            )
+            return
+        
+        filename = f"drive_{file_hash[:8]}.pdf"
+        size_mb = len(pdf_bytes) / 1024 / 1024
+        
+        # Archive.org আপলোড
+        archive_result = upload_to_archive(pdf_bytes, filename)
+        archive_url = archive_result.get('url') if archive_result['success'] else None
+        
+        # PDF প্রসেসিং
+        structured_pages = extract_text_from_pdf_bytes_auto(pdf_bytes)
+        chunks = create_structured_chunks(structured_pages, filename)
+        vector_count = save_structured_to_pinecone(filename, chunks)
+        
+        total_pages = len(structured_pages)
+        total_headlines = sum(len(p['headlines']) for p in structured_pages)
+        total_paras = sum(len(p['paragraphs']) for p in structured_pages)
+        
+        mark_file_as_uploaded(filename, file_hash, archive_url, total_pages, vector_count, size_mb)
+        
+        final_msg = f"✅ **আপনার PDF সফলভাবে সংরক্ষিত হয়েছে!**\n\n"
+        final_msg += f"📄 পৃষ্ঠা: {total_pages}\n"
+        final_msg += f"📌 হেডলাইন: {total_headlines}\n"
+        final_msg += f"📝 প্যারাগ্রাফ: {total_paras}\n"
+        final_msg += f"🗄️ ভেক্টর: {vector_count}\n"
+        final_msg += f"📊 আকার: {size_mb:.2f} MB\n"
+        
+        if archive_url:
+            final_msg += f"\n📚 **Archive.org:** {archive_url}\n\n"
+        
+        final_msg += "🎉 এখন আপনি এই PDF সম্পর্কে প্রশ্ন করতে পারেন!"
+        
+        await update.message.reply_text(final_msg, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"❌ Background processing error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ প্রক্রিয়াকরণে ত্রুটি: {str(e)}")
+
 async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     logger.info(f"🚀 handle_drive_link started with URL: {url}")
@@ -637,65 +692,16 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_drive_folder(update, context, folder_id)
         return
     
-    status_msg = await update.message.reply_text("⏳ Google Drive থেকে PDF ডাউনলোড করা হচ্ছে...")
+    # ✅ সাথে সাথে ইউজারকে জানান
+    await update.message.reply_text(
+        "📥 **আপনার PDF প্রক্রিয়াকরণ শুরু হয়েছে!**\n\n"
+        "⏳ এটি স্ক্যান করা PDF হলে ২০-৩০ মিনিট সময় লাগতে পারে।\n"
+        "✅ প্রক্রিয়া শেষে আপনাকে জানানো হবে।\n\n"
+        "🙏 অনুগ্রহ করে অপেক্ষা করুন..."
+    )
     
-    try:
-        download_url = f"https://drive.google.com/uc?export=download&id={folder_id}"
-        response = requests.get(download_url, timeout=120)
-        
-        if response.status_code != 200:
-            await status_msg.edit_text(f"❌ ডাউনলোড ব্যর্থ: {response.status_code}")
-            return
-        
-        pdf_bytes = response.content
-        file_hash = get_file_hash(pdf_bytes)
-        
-        duplicate = check_file_already_uploaded(file_hash)
-        if duplicate['exists']:
-            await status_msg.edit_text(
-                f"⚠️ **এই ফাইলটি আগেই আপলোড করা হয়েছে!**\n\n"
-                f"📅 আগের আপলোড: {duplicate['date']}\n"
-                f"🔗 Archive.org: {duplicate['archive_url']}",
-                parse_mode="Markdown"
-            )
-            return
-        
-        filename = f"drive_{file_hash[:8]}.pdf"
-        size_mb = len(pdf_bytes) / 1024 / 1024
-        
-        await status_msg.edit_text(f"✅ ডাউনলোড সম্পন্ন ({size_mb:.2f} MB)৷\n⏳ Archive.org-এ আপলোড করা হচ্ছে...")
-        
-        archive_result = upload_to_archive(pdf_bytes, filename)
-        archive_url = archive_result.get('url') if archive_result['success'] else None
-        
-        await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
-        
-        # ✅ অটো-ডিটেক্ট OCR
-        structured_pages = extract_text_from_pdf_bytes_auto(pdf_bytes)
-        chunks = create_structured_chunks(structured_pages, filename)
-        vector_count = save_structured_to_pinecone(filename, chunks)
-        
-        total_pages = len(structured_pages)
-        total_headlines = sum(len(p['headlines']) for p in structured_pages)
-        total_paras = sum(len(p['paragraphs']) for p in structured_pages)
-        
-        mark_file_as_uploaded(filename, file_hash, archive_url, total_pages, vector_count, size_mb)
-        
-        final_msg = f"✅ **সফলভাবে সংরক্ষিত!**\n\n"
-        final_msg += f"📄 পৃষ্ঠা: {total_pages}\n"
-        final_msg += f"📌 হেডলাইন: {total_headlines}\n"
-        final_msg += f"📝 প্যারাগ্রাফ: {total_paras}\n"
-        final_msg += f"🗄️ ভেক্টর: {vector_count}\n"
-        final_msg += f"📊 আকার: {size_mb:.2f} MB\n"
-        
-        if archive_url:
-            final_msg += f"\n📚 **Archive.org:** {archive_url}"
-        
-        await status_msg.edit_text(final_msg, parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"❌ Drive link error: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
+    # ✅ ব্যাকগ্রাউন্ডে প্রসেসিং শুরু
+    asyncio.create_task(process_pdf_background(folder_id, update, context))
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_question = update.message.text
