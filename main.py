@@ -416,8 +416,15 @@ def parse_volume_info(text):
         volume_info['volume'] = int(volume_match.group(1))
     
     return volume_info
-
+    
 async def download_with_retry(client, url, max_retries=3):
+    # ✅ Google Drive confirmation bypass
+    if "drive.google.com" in url and "confirm=" not in url:
+        if "?" in url:
+            url += "&confirm=yes"
+        else:
+            url += "?confirm=yes"
+    
     for attempt in range(max_retries):
         try:
             async with client.stream("GET", url, timeout=120.0) as response:
@@ -434,7 +441,6 @@ async def download_with_retry(client, url, max_retries=3):
         await asyncio.sleep(2 ** attempt)
     
     raise Exception("Download failed")
-
 # --- ১২. PDF প্রসেসিং ফাংশন ---
 def detect_para_nesting(para_text):
     nesting_level = 0
