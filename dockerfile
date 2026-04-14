@@ -1,9 +1,10 @@
 FROM python:3.10-slim
 
-# Tesseract OCR ও Poppler ইন্সটল
+# ✅ Tesseract OCR ও ভাষা প্যাক ইন্সটল
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-ben \
+    tesseract-ocr-ara \
     tesseract-ocr-eng \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
