@@ -678,27 +678,30 @@ async def process_pdf_background(folder_id, update: Update, context: ContextType
 async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     logger.info(f"🚀 handle_drive_link started with URL: {url}")
-    
+
     if 'drive.google.com' not in url:
         return
-    
+
     folder_id, url_type = extract_folder_id_from_url(url)
-    
+
     if not folder_id:
         await update.message.reply_text("❌ অবৈধ Google Drive লিংক।")
         return
-    
+
     if url_type == 'folder':
         await handle_drive_folder(update, context, folder_id)
         return
-    
-    # ✅ সাথে সাথে ইউজারকে জানান
+
+    # ✅ ফরম্যাটিং ছাড়া মেসেজ
     await update.message.reply_text(
-        "📥 **আপনার PDF প্রক্রিয়াকরণ শুরু হয়েছে!**\n\n"
+        "📥 আপনার PDF প্রক্রিয়াকরণ শুরু হয়েছে!\n\n"
         "⏳ এটি স্ক্যান করা PDF হলে ২০-৩০ মিনিট সময় লাগতে পারে।\n"
         "✅ প্রক্রিয়া শেষে আপনাকে জানানো হবে।\n\n"
         "🙏 অনুগ্রহ করে অপেক্ষা করুন..."
     )
+
+    # ✅ ব্যাকগ্রাউন্ডে প্রসেসিং শুরু
+    asyncio.create_task(process_pdf_background(folder_id, update, context))
     
     # ✅ ব্যাকগ্রাউন্ডে প্রসেসিং শুরু
     asyncio.create_task(process_pdf_background(folder_id, update, context))
