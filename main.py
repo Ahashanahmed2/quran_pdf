@@ -517,26 +517,28 @@ def format_search_results(results, query):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 **Quran PDF Bot**\n\n"
+        "<b>🤖 Quran PDF Bot</b>\n\n"
         "/help - সকল কমান্ড দেখুন\n"
         "/status - সিস্টেম স্ট্যাটাস\n"
         "/list - সংরক্ষিত PDF-র তালিকা\n\n"
-        "✨ Google Drive লিংক দিন বড় PDF আপলোড করতে!"
+        "✨ Google Drive লিংক দিন বড় PDF আপলোড করতে!",
+        parse_mode="HTML"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📚 **উপলব্ধ কমান্ডসমূহ:**\n\n"
+        "📚 উপলব্ধ কমান্ডসমূহ:\n\n"
         "/start - বট চালু করুন\n"
         "/help - এই সাহায্য বার্তা\n"
         "/list - সংরক্ষিত PDF-র তালিকা\n"
         "/status - সিস্টেম স্ট্যাটাস\n\n"
-        "**Google Drive থেকে PDF আপলোড:**\n"
+        "Google Drive থেকে PDF আপলোড:\n"
         "1. PDF Google Drive-এ আপলোড করুন\n"
         "2. শেয়ারেবল লিংক কপি করুন\n"
         "3. লিংকটি এখানে পেস্ট করুন\n\n"
-        "**প্রশ্ন:** সরাসরি প্রশ্ন লিখুন"
+        "প্রশ্ন: সরাসরি প্রশ্ন লিখুন"
     )
+    await update.message.reply_text(help_text)  # parse_mode সরানো হয়েছে
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder_id):
