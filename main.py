@@ -2,7 +2,12 @@ import os
 import asyncio
 import io
 import re
+import json
+import hashlib
+import requests
+from datetime import datetime
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse, parse_qs
 from fastapi import FastAPI, Request, Response
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -10,6 +15,8 @@ from telegram.request import HTTPXRequest
 from pypdf import PdfReader
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
+from huggingface_hub import HfApi, login, hf_hub_download
+from internetarchive import configure, upload, search_items
 import logging
 
 # --- ১. লগিং সেটআপ ---
@@ -22,8 +29,34 @@ PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "pcsk_7XHfjD_Ekff9WkF5MPke
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quranqpf")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-2.onrender.com")
 SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET", "asdFGH")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+IA_EMAIL = os.environ.get("IA_EMAIL", "")
+IA_PASSWORD = os.environ.get("IA_PASSWORD", "")
+GOOGLE_DRIVE_API_KEY = os.environ.get("GOOGLE_DRIVE_API_KEY", "")
 
-# --- ৩. Pinecone ও এম্বেডিং মডেল সেটআপ ---
+# HF Dataset Repo (ট্র্যাকিং-এর জন্য)
+HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
+
+# --- ৩. Hugging Face ট্র্যাকিং সেটআপ ---
+hf_api = None
+if HF_TOKEN:
+    try:
+        login(token=HF_TOKEN)
+        hf_api = HfApi(token=HF_TOKEN)
+        hf_api.create_repo(repo_id=HF_TRACKING_REPO, repo_type="dataset", exist_ok=True)
+        logger.info(f"✅ HF Tracking Repo ready: {HF_TRACKING_REPO}")
+    except Exception as e:
+        logger.error(f"❌ HF Tracking setup failed: {e}")
+
+# --- ৪. Archive.org সেটআপ ---
+if IA_EMAIL and IA_PASSWORD:
+    try:
+        configure(IA_EMAIL, IA_PASSWORD)
+        logger.info("✅ Archive.org configured")
+    except Exception as e:
+        logger.error(f"❌ Archive.org setup failed: {e}")
+
+# --- ৫. Pinecone ও এম্বেডিং মডেল সেটআপ ---
 try:
     pc = Pinecone(api_key=PINECONE_API_KEY)
     if PINECONE_INDEX_NAME not in [idx.name for idx in pc.list_indexes()]:
@@ -41,10 +74,171 @@ except Exception as e:
     index = None
     embedding_model = None
 
-# --- ৪. উন্নত PDF প্রসেসিং ফাংশন ---
+# --- ৬. HF ট্র্যাকিং ফাংশন ---
+
+def load_upload_history():
+    """HF Dataset থেকে আপলোড ইতিহাস লোড করা"""
+    try:
+        if hf_api:
+            file_path = hf_hub_download(
+                repo_id=HF_TRACKING_REPO,
+                filename="uploaded_files.json",
+                repo_type="dataset",
+                token=HF_TOKEN
+            )
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"HF থেকে লোড করা যায়নি: {e}")
+    return {"files": {}, "total_uploads": 0}
+
+def save_upload_history(history):
+    """HF Dataset-এ আপলোড ইতিহাস সংরক্ষণ"""
+    try:
+        if hf_api:
+            temp_path = "/tmp/uploaded_files.json"
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+            
+            hf_api.upload_file(
+                path_or_fileobj=temp_path,
+                path_in_repo="uploaded_files.json",
+                repo_id=HF_TRACKING_REPO,
+                repo_type="dataset",
+                commit_message=f"Update tracking - {datetime.now().isoformat()}"
+            )
+            logger.info("✅ Tracking uploaded to Hugging Face")
+            return True
+    except Exception as e:
+        logger.error(f"HF upload failed: {e}")
+    return False
+
+def get_file_hash(pdf_bytes):
+    """PDF-এর MD5 হ্যাশ তৈরি করা"""
+    return hashlib.md5(pdf_bytes).hexdigest()
+
+def check_file_already_uploaded(file_hash):
+    """HF Dataset-এ ফাইল আগে আপলোড হয়েছে কিনা চেক"""
+    history = load_upload_history()
+    if file_hash in history.get('files', {}):
+        return {
+            'exists': True,
+            'date': history['files'][file_hash].get('uploaded_at', 'Unknown'),
+            'archive_url': history['files'][file_hash].get('archive_url', ''),
+            'filename': history['files'][file_hash].get('filename', '')
+        }
+    return {'exists': False}
+
+def mark_file_as_uploaded(filename, file_hash, archive_url, pages, vectors, size_mb):
+    """HF Dataset-এ সফল আপলোড রেকর্ড সংরক্ষণ"""
+    history = load_upload_history()
+    history['files'][file_hash] = {
+        'filename': filename,
+        'hash': file_hash,
+        'uploaded_at': datetime.now().isoformat(),
+        'archive_url': archive_url,
+        'pages': pages,
+        'vectors': vectors,
+        'size_mb': size_mb
+    }
+    history['total_uploads'] = len(history['files'])
+    history['last_updated'] = datetime.now().isoformat()
+    save_upload_history(history)
+
+# --- ৭. Archive.org ফাংশন ---
+
+def upload_to_archive(pdf_bytes, filename, title=""):
+    """PDF Archive.org-এ আপলোড করা"""
+    try:
+        file_hash = hashlib.md5(pdf_bytes).hexdigest()[:10]
+        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+        identifier = f"quran_bot_{file_hash}_{safe_filename.replace('.pdf', '')}"
+        
+        metadata = {
+            'title': title or filename,
+            'mediatype': 'texts',
+            'collection': 'opensource',
+            'description': f"Uploaded via Telegram Quran Bot on {datetime.now().strftime('%Y-%m-%d')}",
+            'subject': ['Quran', 'PDF', 'Telegram Bot'],
+            'language': 'ben'
+        }
+        
+        response = upload(
+            identifier=identifier,
+            files={filename: pdf_bytes},
+            metadata=metadata,
+        )
+        
+        if response[0].status_code == 200:
+            logger.info(f"✅ Archive.org upload: {identifier}")
+            return {
+                'success': True,
+                'identifier': identifier,
+                'url': f"https://archive.org/details/{identifier}",
+                'pdf_url': f"https://archive.org/download/{identifier}/{filename}"
+            }
+        else:
+            logger.error(f"Archive.org upload failed: {response[0].status_code}")
+            return {'success': False, 'error': 'Upload failed'}
+            
+    except Exception as e:
+        logger.error(f"Archive.org error: {e}")
+        return {'success': False, 'error': str(e)}
+
+# --- ৮. Google Drive ফাংশন ---
+
+def extract_folder_id_from_url(url):
+    """Google Drive URL থেকে ফোল্ডার/ফাইল আইডি বের করা"""
+    match = re.search(r'/drive/folders/([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1), 'folder'
+    
+    match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1), 'file'
+    
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    if 'id' in params:
+        return params['id'][0], 'file'
+    
+    return None, None
+
+def get_file_list_from_folder(folder_id):
+    """Google Drive ফোল্ডার থেকে PDF ফাইলের তালিকা"""
+    files = []
+    
+    if GOOGLE_DRIVE_API_KEY:
+        url = "https://www.googleapis.com/drive/v3/files"
+        params = {
+            "q": f"'{folder_id}' in parents and mimeType='application/pdf'",
+            "fields": "files(id, name, size)",
+            "key": GOOGLE_DRIVE_API_KEY,
+            "pageSize": 100
+        }
+        
+        page_token = None
+        while True:
+            if page_token:
+                params["pageToken"] = page_token
+            
+            response = requests.get(url, params=params, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                files.extend(data.get('files', []))
+                page_token = data.get('nextPageToken')
+                if not page_token:
+                    break
+            else:
+                logger.error(f"Google Drive API error: {response.status_code}")
+                break
+    
+    return files
+
+# --- ৯. PDF প্রসেসিং ফাংশন ---
 
 def detect_headlines(page_text):
-    """পৃষ্ঠা থেকে সম্ভাব্য হেডলাইন ডিটেক্ট করা"""
+    """পৃষ্ঠা থেকে হেডলাইন ডিটেক্ট করা"""
     headlines = []
     lines = page_text.split('\n')
     
@@ -54,7 +248,6 @@ def detect_headlines(page_text):
             continue
         
         is_headline = False
-        
         if line.isupper() and len(line) > 3:
             is_headline = True
         elif re.match(r'^[\d\.]+\s+\w+', line):
@@ -72,14 +265,12 @@ def detect_headlines(page_text):
 def extract_paragraphs(page_text):
     """পৃষ্ঠা থেকে প্যারাগ্রাফ আলাদা করা"""
     raw_paras = re.split(r'\n\s*\n', page_text)
-    
     paragraphs = []
     for para in raw_paras:
         para = para.strip()
         if len(para) > 25:
             para = re.sub(r'\s+', ' ', para)
             paragraphs.append(para)
-    
     return paragraphs
 
 def extract_text_from_pdf_bytes_advanced(pdf_bytes):
@@ -119,39 +310,27 @@ def create_structured_chunks(structured_pages, filename):
         headlines = page['headlines']
         paragraphs = page['paragraphs']
         
-        # হেডলাইনগুলো আলাদা চাঙ্ক হিসেবে
         for headline in headlines:
             chunks.append({
                 'text': headline,
-                'metadata': {
-                    'page': page_num,
-                    'type': 'headline',
-                    'headline': headline[:100]
-                }
+                'metadata': {'page': page_num, 'type': 'headline', 'headline': headline[:100]}
             })
         
-        # প্রতিটি প্যারাগ্রাফ আলাদা চাঙ্ক হিসেবে
         for para_num, para_text in enumerate(paragraphs, 1):
             related_headline = headlines[0] if headlines else "No headline"
-            
             chunks.append({
                 'text': para_text,
                 'metadata': {
-                    'page': page_num,
-                    'type': 'paragraph',
-                    'para_number': para_num,
-                    'headline': related_headline[:100],
-                    'total_paras': len(paragraphs)
+                    'page': page_num, 'type': 'paragraph', 'para_number': para_num,
+                    'headline': related_headline[:100], 'total_paras': len(paragraphs)
                 }
             })
         
-        # পুরো পৃষ্ঠার টেক্সটও একটি চাঙ্ক হিসেবে
         if page['full_text'].strip():
             chunks.append({
                 'text': page['full_text'][:2000],
                 'metadata': {
-                    'page': page_num,
-                    'type': 'full_page',
+                    'page': page_num, 'type': 'full_page',
                     'headline': headlines[0][:100] if headlines else "No headline"
                 }
             })
@@ -167,14 +346,10 @@ def save_structured_to_pinecone(filename, chunks):
     for i, chunk_data in enumerate(chunks):
         chunk_text = chunk_data['text']
         metadata = chunk_data['metadata']
-        
         embedding = embedding_model.encode(chunk_text).tolist()
         
         full_metadata = {
-            "filename": filename,
-            "chunk_index": i,
-            "text": chunk_text[:1000],
-            **metadata
+            "filename": filename, "chunk_index": i, "text": chunk_text[:1000], **metadata
         }
         
         vectors.append({
@@ -198,9 +373,7 @@ def search_in_pinecone_advanced(query, top_k=5):
     try:
         query_embedding = embedding_model.encode(query).tolist()
         results = index.query(
-            vector=query_embedding,
-            top_k=top_k,
-            include_metadata=True
+            vector=query_embedding, top_k=top_k, include_metadata=True
         )
         
         chunks = []
@@ -227,13 +400,10 @@ def format_search_results(results, query):
     if not results:
         return "❌ কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি।"
     
-    formatted = f"🔍 **প্রশ্ন:** {query}\n\n"
-    formatted += f"📊 **প্রাপ্ত ফলাফল:** {len(results)}টি\n\n"
+    formatted = f"🔍 **প্রশ্ন:** {query}\n\n📊 **প্রাপ্ত ফলাফল:** {len(results)}টি\n\n"
     
-    # টাইপ অনুযায়ী গ্রুপ করা
     headlines = [r for r in results if r.get('type') == 'headline']
     paragraphs = [r for r in results if r.get('type') == 'paragraph']
-    full_pages = [r for r in results if r.get('type') == 'full_page']
     
     if headlines:
         formatted += "📌 **প্রাসঙ্গিক হেডলাইন:**\n"
@@ -251,22 +421,18 @@ def format_search_results(results, query):
                 formatted += f" | প্যারা {p['para_number']}"
             formatted += f"\n{p['text'][:300]}...\n"
     
-    if full_pages and not paragraphs:
-        formatted += "📄 **পৃষ্ঠার তথ্য:**\n"
-        for fp in full_pages[:1]:
-            formatted += f"\n📍 **পৃষ্ঠা {fp['page']}**\n{fp['text'][:400]}...\n"
-    
     formatted += f"\n---\n📚 **সোর্স:** {results[0].get('filename', 'Unknown')}"
-    
     return formatted
 
-# --- ৫. টেলিগ্রাম বট হ্যান্ডলার ---
+# --- ১০. Telegram বট হ্যান্ডলার ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **Quran PDF Bot**\n\n"
         "/help - সকল কমান্ড দেখুন\n"
-        "/status - সিস্টেম স্ট্যাটাস\n\n"
-        "✨ **ফিচার:** পৃষ্ঠা নম্বর, হেডলাইন, প্যারা নম্বর সহ তথ্য!"
+        "/status - সিস্টেম স্ট্যাটাস\n"
+        "/list - সংরক্ষিত PDF-র তালিকা\n\n"
+        "✨ Google Drive লিংক দিন বড় PDF আপলোড করতে!"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,87 +440,189 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📚 **উপলব্ধ কমান্ডসমূহ:**\n\n"
         "/start - বট চালু করুন\n"
         "/help - এই সাহায্য বার্তা\n"
-        "/file - PDF আপলোড করুন\n"
         "/list - সংরক্ষিত PDF-র তালিকা\n"
         "/status - সিস্টেম স্ট্যাটাস\n\n"
-        "**PDF আপলোড:** `/file` লিখে PDF পাঠান\n"
-        "**প্রশ্ন:** সরাসরি প্রশ্ন লিখুন\n\n"
-        "✨ উত্তর পৃষ্ঠা নম্বর, হেডলাইন ও প্যারা রেফারেন্সসহ আসবে!"
+        "**Google Drive থেকে PDF আপলোড:**\n"
+        "1. PDF Google Drive-এ আপলোড করুন\n"
+        "2. শেয়ারেবল লিংক কপি করুন\n"
+        "3. লিংকটি এখানে পেস্ট করুন\n\n"
+        "**প্রশ্ন:** সরাসরি প্রশ্ন লিখুন"
     )
     await update.message.reply_text(help_text)
 
-async def handle_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("📂 handle_file_command called")
+async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Google Drive লিংক থেকে PDF ডাউনলোড ও প্রক্রিয়াকরণ"""
+    url = update.message.text
     
-    if update.message.document:
-        document = update.message.document
-        logger.info(f"📄 Document: {document.file_name}, size: {document.file_size} bytes")
+    if 'drive.google.com' not in url:
+        return
+    
+    folder_id, url_type = extract_folder_id_from_url(url)
+    
+    if not folder_id:
+        await update.message.reply_text("❌ অবৈধ Google Drive লিংক।")
+        return
+    
+    if url_type == 'folder':
+        await handle_drive_folder(update, context, folder_id)
+        return
+    
+    status_msg = await update.message.reply_text("⏳ Google Drive থেকে PDF ডাউনলোড করা হচ্ছে...")
+    
+    try:
+        download_url = f"https://drive.google.com/uc?export=download&id={folder_id}"
+        response = requests.get(download_url, timeout=120)
         
-        if not document.file_name.endswith('.pdf'):
-            await update.message.reply_text("❌ শুধুমাত্র PDF ফাইল সমর্থিত।")
+        if response.status_code != 200:
+            await status_msg.edit_text(f"❌ ডাউনলোড ব্যর্থ: {response.status_code}")
             return
         
-        status_msg = await update.message.reply_text(f"⏳ '{document.file_name}' ডাউনলোড হচ্ছে...")
+        pdf_bytes = response.content
+        file_hash = get_file_hash(pdf_bytes)
         
+        # ডুপ্লিকেট চেক
+        duplicate = check_file_already_uploaded(file_hash)
+        if duplicate['exists']:
+            await status_msg.edit_text(
+                f"⚠️ **এই ফাইলটি আগেই আপলোড করা হয়েছে!**\n\n"
+                f"📅 আগের আপলোড: {duplicate['date']}\n"
+                f"🔗 Archive.org: {duplicate['archive_url']}"
+            )
+            return
+        
+        filename = f"drive_{file_hash[:8]}.pdf"
+        size_mb = len(pdf_bytes) / 1024 / 1024
+        
+        await status_msg.edit_text(f"✅ ডাউনলোড সম্পন্ন ({size_mb:.2f} MB)৷\n⏳ Archive.org-এ আপলোড করা হচ্ছে...")
+        
+        # Archive.org আপলোড
+        archive_result = upload_to_archive(pdf_bytes, filename)
+        archive_url = archive_result.get('url') if archive_result['success'] else None
+        
+        await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
+        
+        # Pinecone প্রক্রিয়াকরণ
+        structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
+        chunks = create_structured_chunks(structured_pages, filename)
+        vector_count = save_structured_to_pinecone(filename, chunks)
+        
+        total_pages = len(structured_pages)
+        total_headlines = sum(len(p['headlines']) for p in structured_pages)
+        total_paras = sum(len(p['paragraphs']) for p in structured_pages)
+        
+        # HF-এ রেকর্ড সংরক্ষণ
+        mark_file_as_uploaded(filename, file_hash, archive_url, total_pages, vector_count, size_mb)
+        
+        final_msg = f"✅ **সফলভাবে সংরক্ষিত!**\n\n"
+        final_msg += f"📄 পৃষ্ঠা: {total_pages}\n"
+        final_msg += f"📌 হেডলাইন: {total_headlines}\n"
+        final_msg += f"📝 প্যারাগ্রাফ: {total_paras}\n"
+        final_msg += f"🗄️ ভেক্টর: {vector_count}\n"
+        final_msg += f"📊 আকার: {size_mb:.2f} MB\n"
+        
+        if archive_url:
+            final_msg += f"\n📚 **Archive.org:** {archive_url}"
+        
+        await status_msg.edit_text(final_msg)
+        
+    except Exception as e:
+        await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
+
+async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder_id):
+    """Google Drive ফোল্ডার প্রক্রিয়াকরণ"""
+    status_msg = await update.message.reply_text("📁 ফোল্ডার স্ক্যান করা হচ্ছে...")
+    
+    files = get_file_list_from_folder(folder_id)
+    
+    if not files:
+        await status_msg.edit_text("ℹ️ এই ফোল্ডারে কোনো PDF ফাইল পাওয়া যায়নি।")
+        return
+    
+    new_files = []
+    duplicate_files = []
+    
+    for file in files:
+        # দ্রুত চেক - ফাইলের নাম দিয়ে
+        temp_hash = hashlib.md5(f"{file['name']}_{file.get('size', '')}".encode()).hexdigest()
+        if check_file_already_uploaded(temp_hash)['exists']:
+            duplicate_files.append(file)
+        else:
+            new_files.append(file)
+    
+    report = f"📊 **ফোল্ডার স্ক্যান রিপোর্ট**\n\n"
+    report += f"📁 মোট PDF: {len(files)}টি\n"
+    report += f"🆕 নতুন: {len(new_files)}টি\n"
+    report += f"⏭️ আগে আপলোডকৃত: {len(duplicate_files)}টি\n\n"
+    
+    if duplicate_files:
+        report += "**আগে আপলোডকৃত (স্কিপ হবে):**\n"
+        for f in duplicate_files[:5]:
+            report += f"• {f['name']}\n"
+        if len(duplicate_files) > 5:
+            report += f"...এবং আরও {len(duplicate_files) - 5}টি\n"
+        report += "\n"
+    
+    if not new_files:
+        report += "ℹ️ প্রক্রিয়াকরণের জন্য কোনো নতুন ফাইল নেই।"
+        await status_msg.edit_text(report)
+        return
+    
+    report += f"⏳ {len(new_files)}টি নতুন ফাইল প্রক্রিয়াকরণ শুরু..."
+    await status_msg.edit_text(report)
+    
+    processed = 0
+    failed = 0
+    
+    for file in new_files:
         try:
-            file = await context.bot.get_file(document.file_id)
-            pdf_bytes = await file.download_as_bytearray()
-            logger.info(f"📥 Downloaded {len(pdf_bytes)} bytes")
+            download_url = f"https://drive.google.com/uc?export=download&id={file['id']}"
+            response = requests.get(download_url, timeout=120)
             
-            await status_msg.edit_text("⏳ টেক্সট এক্সট্র্যাক্ট হচ্ছে (পৃষ্ঠা, হেডলাইন, প্যারা)...")
+            if response.status_code != 200:
+                failed += 1
+                continue
+            
+            pdf_bytes = response.content
+            file_hash = get_file_hash(pdf_bytes)
+            filename = file['name']
+            size_mb = len(pdf_bytes) / 1024 / 1024
+            
+            archive_result = upload_to_archive(pdf_bytes, filename)
+            archive_url = archive_result.get('url') if archive_result['success'] else None
             
             structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
+            chunks = create_structured_chunks(structured_pages, filename)
+            vector_count = save_structured_to_pinecone(filename, chunks)
             
-            if not structured_pages:
-                await status_msg.edit_text("❌ PDF থেকে কোনো টেক্সট পাওয়া যায়নি।")
-                return
+            mark_file_as_uploaded(filename, file_hash, archive_url, len(structured_pages), vector_count, size_mb)
             
-            total_pages = len(structured_pages)
-            total_headlines = sum(len(p['headlines']) for p in structured_pages)
-            total_paras = sum(len(p['paragraphs']) for p in structured_pages)
-            
-            await status_msg.edit_text(
-                f"📊 প্রাপ্ত তথ্য:\n"
-                f"📄 পৃষ্ঠা: {total_pages}\n"
-                f"📌 হেডলাইন: {total_headlines}\n"
-                f"📝 প্যারাগ্রাফ: {total_paras}\n\n"
-                f"⏳ Pinecone-এ সংরক্ষণ হচ্ছে..."
-            )
-            
-            chunks = create_structured_chunks(structured_pages, document.file_name)
-            vector_count = save_structured_to_pinecone(document.file_name, chunks)
-            logger.info(f"💾 Saved {vector_count} vectors to Pinecone")
-            
-            await status_msg.edit_text(
-                f"✅ **'{document.file_name}'** সফলভাবে সংরক্ষিত!\n\n"
-                f"📄 পৃষ্ঠা: {total_pages}\n"
-                f"📌 হেডলাইন: {total_headlines}\n"
-                f"📝 প্যারাগ্রাফ: {total_paras}\n"
-                f"🗄️ মোট ভেক্টর: {vector_count}\n\n"
-                f"ℹ️ এখন প্রশ্ন করলে পৃষ্ঠা, হেডলাইন ও প্যারা রেফারেন্স পাবেন!"
-            )
+            processed += 1
             
         except Exception as e:
-            logger.error(f"❌ PDF প্রসেসিং ত্রুটি: {e}", exc_info=True)
-            await status_msg.edit_text(f"❌ ত্রুটি: {str(e)}")
-    else:
-        await update.message.reply_text("📎 দয়া করে একটি PDF ফাইল পাঠান।")
+            logger.error(f"Failed: {file['name']} - {e}")
+            failed += 1
+    
+    final_report = f"✅ **ফোল্ডার প্রক্রিয়াকরণ সম্পন্ন!**\n\n"
+    final_report += f"✅ সফল: {processed}টি\n"
+    final_report += f"❌ ব্যর্থ: {failed}টি"
+    
+    await update.message.reply_text(final_report)
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_question = update.message.text
-    logger.info(f"❓ Question: {user_question[:50]}...")
     
+    if 'drive.google.com' in user_question:
+        await handle_drive_link(update, context)
+        return
+    
+    logger.info(f"❓ Question: {user_question[:50]}...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     try:
         results = search_in_pinecone_advanced(user_question, top_k=5)
-        logger.info(f"🔍 Found {len(results)} results")
-        
         formatted_answer = format_search_results(results, user_question)
-        await update.message.reply_text(formatted_answer, parse_mode="Markdown")
-        
+        await update.message.reply_text(formatted_answer)
     except Exception as e:
-        logger.error(f"প্রশ্ন প্রসেসিং ত্রুটি: {e}")
         await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -363,53 +631,46 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Pinecone সংযুক্ত নয়")
             return
         
-        results = index.query(
-            vector=[0.1]*384,
-            top_k=1000,
-            include_metadata=True
-        )
+        results = index.query(vector=[0.1]*384, top_k=1000, include_metadata=True)
         
         file_stats = {}
         for match in results.matches:
             if match.metadata and 'filename' in match.metadata:
                 filename = match.metadata['filename']
                 if filename not in file_stats:
-                    file_stats[filename] = {'pages': set(), 'headlines': 0, 'paras': 0}
-                
+                    file_stats[filename] = {'pages': set(), 'vectors': 0}
                 page = match.metadata.get('page')
                 if page:
                     file_stats[filename]['pages'].add(page)
-                if match.metadata.get('headline') and match.metadata['headline'] != 'N/A':
-                    file_stats[filename]['headlines'] += 1
-                if match.metadata.get('type') == 'paragraph':
-                    file_stats[filename]['paras'] += 1
+                file_stats[filename]['vectors'] += 1
         
         if file_stats:
             file_list = ""
             for filename, stats in file_stats.items():
                 file_list += f"\n📁 **{filename}**\n"
                 file_list += f"   📄 পৃষ্ঠা: {len(stats['pages'])}\n"
-                file_list += f"   📌 হেডলাইন: {stats['headlines']}\n"
-                file_list += f"   📝 প্যারাগ্রাফ: {stats['paras']}\n"
-            
-            await update.message.reply_text(f"**সংরক্ষিত PDF:**\n{file_list}", parse_mode="Markdown")
+                file_list += f"   🗄️ ভেক্টর: {stats['vectors']}\n"
+            await update.message.reply_text(f"**সংরক্ষিত PDF:**\n{file_list}")
         else:
             await update.message.reply_text("ℹ️ এখনো কোনো PDF সংরক্ষিত হয়নি।")
-            
     except Exception as e:
         await update.message.reply_text(f"❌ ত্রুটি: {str(e)}")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pc_status = "✅" if index is not None else "❌"
+    hf_status = "✅" if hf_api is not None else "❌"
+    ia_status = "✅" if IA_EMAIL and IA_PASSWORD else "❌"
+    
     status_text = (
         f"📊 **সিস্টেম স্ট্যাটাস**\n\n"
         f"🗄️ Pinecone: {pc_status}\n"
-        f"📚 ইনডেক্স: {PINECONE_INDEX_NAME}\n\n"
-        f"✨ **ফিচার:** পৃষ্ঠা, হেডলাইন, প্যারা নম্বর সহ তথ্য!"
+        f"📚 Archive.org: {ia_status}\n"
+        f"🔍 HF Tracking: {hf_status}\n"
+        f"📁 ইনডেক্স: {PINECONE_INDEX_NAME}"
     )
-    await update.message.reply_text(status_text, parse_mode="Markdown")
+    await update.message.reply_text(status_text)
 
-# --- ৬. FastAPI Lifespan ---
+# --- ১১. FastAPI Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     request = HTTPXRequest(connection_pool_size=10, read_timeout=120, write_timeout=120)
@@ -419,10 +680,8 @@ async def lifespan(app: FastAPI):
     
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("help", help_command))
-    ptb_app.add_handler(CommandHandler("file", handle_file_command))
     ptb_app.add_handler(CommandHandler("list", list_files))
     ptb_app.add_handler(CommandHandler("status", status))
-    ptb_app.add_handler(MessageHandler(filters.Document.PDF, handle_file_command))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_question))
     
     await ptb_app.initialize()
@@ -439,10 +698,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- ৭. রুট এন্ডপয়েন্ট ---
+# --- ১২. রুট এন্ডপয়েন্ট ---
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Bot is running", "service": "Quran PDF Bot"}
+    return {"status": "ok", "service": "Quran PDF Bot"}
 
 @app.get("/healthcheck")
 async def health():
@@ -461,11 +720,9 @@ async def telegram_webhook(request: Request):
     update = Update.de_json(data, bot)
     
     await ptb_app.process_update(update)
-    
     return Response(status_code=200)
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
-    print(f"Starting server on 0.0.0.0:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port)
