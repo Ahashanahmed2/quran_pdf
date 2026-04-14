@@ -5,7 +5,7 @@ import re
 import json
 import hashlib
 import requests
-import gc  # ✅ মেমোরি ক্লিয়ার করার জন্য
+import gc
 from datetime import datetime
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, parse_qs
@@ -35,7 +35,6 @@ IA_EMAIL = os.environ.get("IA_EMAIL", "")
 IA_PASSWORD = os.environ.get("IA_PASSWORD", "")
 GOOGLE_DRIVE_API_KEY = os.environ.get("GOOGLE_DRIVE_API_KEY", "")
 
-# HF Dataset Repo (ট্র্যাকিং-এর জন্য)
 HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
 
 # --- ৩. Hugging Face ট্র্যাকিং সেটআপ ---
@@ -78,7 +77,6 @@ except Exception as e:
 # --- ৬. HF ট্র্যাকিং ফাংশন ---
 
 def load_upload_history():
-    """HF Dataset থেকে আপলোড ইতিহাস লোড করা"""
     try:
         if hf_api:
             file_path = hf_hub_download(
@@ -94,7 +92,6 @@ def load_upload_history():
     return {"files": {}, "total_uploads": 0}
 
 def save_upload_history(history):
-    """HF Dataset-এ আপলোড ইতিহাস সংরক্ষণ"""
     try:
         if hf_api:
             temp_path = "/tmp/uploaded_files.json"
@@ -115,11 +112,9 @@ def save_upload_history(history):
     return False
 
 def get_file_hash(pdf_bytes):
-    """PDF-এর MD5 হ্যাশ তৈরি করা"""
     return hashlib.md5(pdf_bytes).hexdigest()
 
 def check_file_already_uploaded(file_hash):
-    """HF Dataset-এ ফাইল আগে আপলোড হয়েছে কিনা চেক"""
     history = load_upload_history()
     if file_hash in history.get('files', {}):
         return {
@@ -131,7 +126,6 @@ def check_file_already_uploaded(file_hash):
     return {'exists': False}
 
 def mark_file_as_uploaded(filename, file_hash, archive_url, pages, vectors, size_mb):
-    """HF Dataset-এ সফল আপলোড রেকর্ড সংরক্ষণ"""
     history = load_upload_history()
     history['files'][file_hash] = {
         'filename': filename,
@@ -146,13 +140,18 @@ def mark_file_as_uploaded(filename, file_hash, archive_url, pages, vectors, size
     history['last_updated'] = datetime.now().isoformat()
     save_upload_history(history)
 
-# --- ৭. Archive.org ফাংশন ---
+# --- ৭. Archive.org ফাংশন (বাগ ফিক্সড) ---
 
 def upload_to_archive(pdf_bytes, filename, title=""):
-    """PDF Archive.org-এ আপলোড করা"""
     try:
         file_hash = hashlib.md5(pdf_bytes).hexdigest()[:10]
+        # ✅ ফাইলের নাম থেকে সব বিশেষ অক্ষর সরান
         safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+        safe_filename = safe_filename.replace('\x00', '')
+        safe_filename = safe_filename.strip()
+        if not safe_filename:
+            safe_filename = f"document_{file_hash}.pdf"
+        
         identifier = f"quran_bot_{file_hash}_{safe_filename.replace('.pdf', '')}"
         
         metadata = {
@@ -166,7 +165,7 @@ def upload_to_archive(pdf_bytes, filename, title=""):
         
         response = upload(
             identifier=identifier,
-            files={filename: pdf_bytes},
+            files={safe_filename: pdf_bytes},
             metadata=metadata,
         )
         
@@ -176,7 +175,7 @@ def upload_to_archive(pdf_bytes, filename, title=""):
                 'success': True,
                 'identifier': identifier,
                 'url': f"https://archive.org/details/{identifier}",
-                'pdf_url': f"https://archive.org/download/{identifier}/{filename}"
+                'pdf_url': f"https://archive.org/download/{identifier}/{safe_filename}"
             }
         else:
             logger.error(f"Archive.org upload failed: {response[0].status_code}")
@@ -189,7 +188,6 @@ def upload_to_archive(pdf_bytes, filename, title=""):
 # --- ৮. Google Drive ফাংশন ---
 
 def extract_folder_id_from_url(url):
-    """Google Drive URL থেকে ফোল্ডার/ফাইল আইডি বের করা"""
     match = re.search(r'/drive/folders/([a-zA-Z0-9_-]+)', url)
     if match:
         return match.group(1), 'folder'
@@ -206,9 +204,7 @@ def extract_folder_id_from_url(url):
     return None, None
 
 def get_file_list_from_folder(folder_id):
-    """Google Drive ফোল্ডার থেকে PDF ফাইলের তালিকা"""
     files = []
-    
     if GOOGLE_DRIVE_API_KEY:
         url = "https://www.googleapis.com/drive/v3/files"
         params = {
@@ -217,12 +213,10 @@ def get_file_list_from_folder(folder_id):
             "key": GOOGLE_DRIVE_API_KEY,
             "pageSize": 100
         }
-        
         page_token = None
         while True:
             if page_token:
                 params["pageToken"] = page_token
-            
             response = requests.get(url, params=params, timeout=30)
             if response.status_code == 200:
                 data = response.json()
@@ -233,21 +227,17 @@ def get_file_list_from_folder(folder_id):
             else:
                 logger.error(f"Google Drive API error: {response.status_code}")
                 break
-    
     return files
 
-# --- ৯. PDF প্রসেসিং ফাংশন (ব্যাচ প্রসেসিং সহ) ---
+# --- ৯. PDF প্রসেসিং ফাংশন (ব্যাচ প্রসেসিং) ---
 
 def detect_headlines(page_text):
-    """পৃষ্ঠা থেকে হেডলাইন ডিটেক্ট করা"""
     headlines = []
     lines = page_text.split('\n')
-    
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        
         is_headline = False
         if line.isupper() and len(line) > 3:
             is_headline = True
@@ -257,14 +247,11 @@ def detect_headlines(page_text):
             is_headline = True
         elif re.match(r'^[=\-]{2,}.*[=\-]{2,}$', line):
             is_headline = True
-            
         if is_headline:
             headlines.append(line)
-    
     return headlines
 
 def extract_paragraphs(page_text):
-    """পৃষ্ঠা থেকে প্যারাগ্রাফ আলাদা করা"""
     raw_paras = re.split(r'\n\s*\n', page_text)
     paragraphs = []
     for para in raw_paras:
@@ -275,7 +262,6 @@ def extract_paragraphs(page_text):
     return paragraphs
 
 def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
-    """পিডিএফ থেকে টেক্সট ব্যাচে ব্যাচে এক্সট্র্যাক্ট করা (মেমোরি অপ্টিমাইজড)"""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
@@ -306,7 +292,6 @@ def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
                 if (page_num + 1) % 10 == 0:
                     logger.info(f"   📄 Page {page_num + 1}: {len(headlines)} headlines, {len(paragraphs)} paragraphs")
             
-            # প্রতি ব্যাচের পর মেমোরি ক্লিয়ার
             gc.collect()
             logger.info(f"   🧹 Memory cleared after batch")
         
@@ -317,56 +302,45 @@ def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
         raise
 
 def create_structured_chunks(structured_pages, filename):
-    """স্ট্রাকচার্ড ডেটা থেকে চাঙ্ক তৈরি (ব্যাচে ব্যাচে)"""
     chunks = []
-    batch_size = 100
-    total_pages = len(structured_pages)
-    
-    for batch_start in range(0, total_pages, batch_size):
-        batch_end = min(batch_start + batch_size, total_pages)
+    for page in structured_pages:
+        page_num = page['page_number']
+        headlines = page['headlines']
+        paragraphs = page['paragraphs']
         
-        for i in range(batch_start, batch_end):
-            page = structured_pages[i]
-            page_num = page['page_number']
-            headlines = page['headlines']
-            paragraphs = page['paragraphs']
-            
-            for headline in headlines:
-                chunks.append({
-                    'text': headline,
-                    'metadata': {'page': page_num, 'type': 'headline', 'headline': headline[:100]}
-                })
-            
-            for para_num, para_text in enumerate(paragraphs, 1):
-                related_headline = headlines[0] if headlines else "No headline"
-                chunks.append({
-                    'text': para_text,
-                    'metadata': {
-                        'page': page_num, 'type': 'paragraph', 'para_number': para_num,
-                        'headline': related_headline[:100], 'total_paras': len(paragraphs)
-                    }
-                })
-            
-            if page['full_text'].strip():
-                chunks.append({
-                    'text': page['full_text'][:2000],
-                    'metadata': {
-                        'page': page_num, 'type': 'full_page',
-                        'headline': headlines[0][:100] if headlines else "No headline"
-                    }
-                })
+        for headline in headlines:
+            chunks.append({
+                'text': headline,
+                'metadata': {'page': page_num, 'type': 'headline', 'headline': headline[:100]}
+            })
         
-        gc.collect()
+        for para_num, para_text in enumerate(paragraphs, 1):
+            related_headline = headlines[0] if headlines else "No headline"
+            chunks.append({
+                'text': para_text,
+                'metadata': {
+                    'page': page_num, 'type': 'paragraph', 'para_number': para_num,
+                    'headline': related_headline[:100], 'total_paras': len(paragraphs)
+                }
+            })
+        
+        if page['full_text'].strip():
+            chunks.append({
+                'text': page['full_text'][:2000],
+                'metadata': {
+                    'page': page_num, 'type': 'full_page',
+                    'headline': headlines[0][:100] if headlines else "No headline"
+                }
+            })
     
     return chunks
 
 def save_structured_to_pinecone(filename, chunks):
-    """স্ট্রাকচার্ড চাঙ্কগুলো Pinecone-এ সংরক্ষণ (ব্যাচে ব্যাচে)"""
     if index is None or embedding_model is None:
         raise Exception("Pinecone বা এম্বেডিং মডেল লোড হয়নি")
     
     vectors = []
-    batch_size = 50  # Pinecone আপলোড ব্যাচ
+    batch_size = 50
     
     for i, chunk_data in enumerate(chunks):
         chunk_text = chunk_data['text']
@@ -383,14 +357,12 @@ def save_structured_to_pinecone(filename, chunks):
             "metadata": full_metadata
         })
         
-        # প্রতি batch_size ভেক্টর পর পর Pinecone-এ আপলোড
         if len(vectors) >= batch_size:
             index.upsert(vectors=vectors)
             logger.info(f"   📤 Uploaded {len(vectors)} vectors to Pinecone")
             vectors = []
             gc.collect()
     
-    # বাকি ভেক্টর আপলোড
     if vectors:
         index.upsert(vectors=vectors)
         logger.info(f"   📤 Uploaded final {len(vectors)} vectors to Pinecone")
@@ -398,7 +370,6 @@ def save_structured_to_pinecone(filename, chunks):
     return len(chunks)
 
 def search_in_pinecone_advanced(query, top_k=5):
-    """উন্নত সার্চ - রেজাল্টে পৃষ্ঠা, হেডলাইন, প্যারা নম্বর সহ"""
     if index is None or embedding_model is None:
         return []
     
@@ -421,14 +392,12 @@ def search_in_pinecone_advanced(query, top_k=5):
                     "type": metadata.get("type", "text"),
                     "score": match.score
                 })
-        
         return chunks
     except Exception as e:
         logger.error(f"Pinecone সার্চ ত্রুটি: {e}")
         return []
 
 def format_search_results(results, query):
-    """সার্চ রেজাল্ট সুন্দরভাবে ফরম্যাট করা"""
     if not results:
         return "❌ কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি।"
     
@@ -483,9 +452,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder_id):
-    """Google Drive ফোল্ডার প্রক্রিয়াকরণ"""
     status_msg = await update.message.reply_text("📁 ফোল্ডার স্ক্যান করা হচ্ছে...")
-    
     files = get_file_list_from_folder(folder_id)
     
     if not files:
@@ -562,16 +529,13 @@ async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(final_report, parse_mode="Markdown")
 
 async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Google Drive লিংক থেকে PDF ডাউনলোড ও প্রক্রিয়াকরণ"""
     url = update.message.text
     logger.info(f"🚀 handle_drive_link started with URL: {url}")
     
     if 'drive.google.com' not in url:
-        logger.warning("Not a Drive URL")
         return
     
     folder_id, url_type = extract_folder_id_from_url(url)
-    logger.info(f"📁 Folder ID: {folder_id}, Type: {url_type}")
     
     if not folder_id:
         await update.message.reply_text("❌ অবৈধ Google Drive লিংক।")
@@ -582,7 +546,6 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     status_msg = await update.message.reply_text("⏳ Google Drive থেকে PDF ডাউনলোড করা হচ্ছে...")
-    logger.info("📥 Starting download...")
     
     try:
         download_url = f"https://drive.google.com/uc?export=download&id={folder_id}"
@@ -594,7 +557,6 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         pdf_bytes = response.content
         file_hash = get_file_hash(pdf_bytes)
-        logger.info(f"📥 Downloaded {len(pdf_bytes)} bytes, hash: {file_hash[:16]}")
         
         duplicate = check_file_already_uploaded(file_hash)
         if duplicate['exists']:
@@ -610,15 +572,12 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_mb = len(pdf_bytes) / 1024 / 1024
         
         await status_msg.edit_text(f"✅ ডাউনলোড সম্পন্ন ({size_mb:.2f} MB)৷\n⏳ Archive.org-এ আপলোড করা হচ্ছে...")
-        logger.info("📤 Uploading to Archive.org...")
         
         archive_result = upload_to_archive(pdf_bytes, filename)
         archive_url = archive_result.get('url') if archive_result['success'] else None
         
         await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
-        logger.info("📊 Processing PDF...")
         
-        # ✅ ব্যাচ প্রসেসিং সহ এক্সট্র্যাক্ট
         structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
         chunks = create_structured_chunks(structured_pages, filename)
         vector_count = save_structured_to_pinecone(filename, chunks)
@@ -628,7 +587,6 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_paras = sum(len(p['paragraphs']) for p in structured_pages)
         
         mark_file_as_uploaded(filename, file_hash, archive_url, total_pages, vector_count, size_mb)
-        logger.info(f"✅ File processed: {total_pages} pages, {vector_count} vectors")
         
         final_msg = f"✅ **সফলভাবে সংরক্ষিত!**\n\n"
         final_msg += f"📄 পৃষ্ঠা: {total_pages}\n"
@@ -648,14 +606,11 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_question = update.message.text
-    logger.info(f"📨 Received message: {user_question[:100]}...")
     
     if 'drive.google.com' in user_question:
-        logger.info("🔗 Google Drive link detected, forwarding to handler...")
         await handle_drive_link(update, context)
         return
     
-    logger.info(f"❓ Question: {user_question[:50]}...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     try:
