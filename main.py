@@ -20,6 +20,16 @@ from huggingface_hub import HfApi, login, hf_hub_download
 from internetarchive import configure, upload
 import logging
 
+# ✅ OCR লাইব্রেরি
+try:
+    import pytesseract
+    from pdf2image import convert_from_bytes
+    OCR_AVAILABLE = True
+    logger_ocr = logging.getLogger(__name__)
+except ImportError:
+    OCR_AVAILABLE = False
+    print("⚠️ OCR libraries not available. Install: pytesseract, pdf2image")
+
 # --- ১. লগিং সেটআপ ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -140,17 +150,20 @@ def mark_file_as_uploaded(filename, file_hash, archive_url, pages, vectors, size
     history['last_updated'] = datetime.now().isoformat()
     save_upload_history(history)
 
-# --- ৭. Archive.org ফাংশন (বাগ ফিক্সড) ---
+# --- ৭. Archive.org ফাংশন ---
 
 def upload_to_archive(pdf_bytes, filename, title=""):
     try:
         file_hash = hashlib.md5(pdf_bytes).hexdigest()[:10]
-        # ✅ ফাইলের নাম থেকে সব বিশেষ অক্ষর সরান
-        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
-        safe_filename = safe_filename.replace('\x00', '')
-        safe_filename = safe_filename.strip()
-        if not safe_filename:
+        
+        safe_filename = re.sub(r'[^\x20-\x7E]', '_', filename)
+        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', safe_filename)
+        safe_filename = re.sub(r'_+', '_', safe_filename)
+        safe_filename = safe_filename.strip('_')
+        if not safe_filename or safe_filename == '.pdf':
             safe_filename = f"document_{file_hash}.pdf"
+        elif not safe_filename.endswith('.pdf'):
+            safe_filename += '.pdf'
         
         identifier = f"quran_bot_{file_hash}_{safe_filename.replace('.pdf', '')}"
         
@@ -229,7 +242,7 @@ def get_file_list_from_folder(folder_id):
                 break
     return files
 
-# --- ৯. PDF প্রসেসিং ফাংশন (ব্যাচ প্রসেসিং) ---
+# --- ৯. PDF প্রসেসিং ফাংশন ---
 
 def detect_headlines(page_text):
     headlines = []
@@ -262,6 +275,7 @@ def extract_paragraphs(page_text):
     return paragraphs
 
 def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
+    """টেক্সট-বেসড PDF থেকে টেক্সট এক্সট্র্যাক্ট"""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
@@ -300,6 +314,84 @@ def extract_text_from_pdf_bytes_advanced(pdf_bytes, batch_size=50):
     except Exception as e:
         logger.error(f"PDF এক্সট্র্যাক্ট ত্রুটি: {e}")
         raise
+
+def extract_text_from_pdf_bytes_ocr(pdf_bytes, batch_size=10):
+    """OCR ব্যবহার করে স্ক্যান করা PDF থেকে টেক্সট এক্সট্র্যাক্ট"""
+    if not OCR_AVAILABLE:
+        logger.error("❌ OCR libraries not available")
+        return []
+    
+    try:
+        images = convert_from_bytes(pdf_bytes, dpi=150)  # DPI কমানো হয়েছে মেমোরির জন্য
+        total_pages = len(images)
+        structured_pages = []
+        
+        logger.info(f"📚 Total pages: {total_pages}, processing with OCR in batches of {batch_size}")
+        
+        for batch_start in range(0, total_pages, batch_size):
+            batch_end = min(batch_start + batch_size, total_pages)
+            logger.info(f"🖼️ Processing OCR batch: pages {batch_start+1}-{batch_end} of {total_pages}")
+            
+            for page_num in range(batch_start, batch_end):
+                image = images[page_num]
+                
+                # OCR দিয়ে টেক্সট এক্সট্র্যাক্ট (বাংলা + ইংরেজি)
+                try:
+                    page_text = pytesseract.image_to_string(image, lang='ben+eng')
+                except:
+                    page_text = pytesseract.image_to_string(image, lang='eng')
+                
+                if not page_text or not page_text.strip():
+                    continue
+                
+                headlines = detect_headlines(page_text)
+                paragraphs = extract_paragraphs(page_text)
+                
+                structured_pages.append({
+                    'page_number': page_num + 1,
+                    'headlines': headlines,
+                    'paragraphs': paragraphs,
+                    'full_text': page_text
+                })
+                
+                if (page_num + 1) % 5 == 0:
+                    logger.info(f"   📄 Page {page_num + 1}: {len(headlines)} headlines, {len(paragraphs)} paragraphs")
+            
+            gc.collect()
+            logger.info(f"   🧹 Memory cleared after OCR batch")
+        
+        logger.info(f"✅ OCR extraction complete: {len(structured_pages)} pages processed")
+        return structured_pages
+        
+    except Exception as e:
+        logger.error(f"OCR এক্সট্র্যাক্ট ত্রুটি: {e}")
+        raise
+
+def extract_text_from_pdf_bytes_auto(pdf_bytes):
+    """অটো-ডিটেক্ট: PDF টেক্সট-বেসড না স্ক্যান করা"""
+    try:
+        # প্রথমে টেক্সট-বেসড হিসেবে ট্রাই
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        if len(reader.pages) == 0:
+            return []
+        
+        first_page_text = reader.pages[0].extract_text() if len(reader.pages) > 0 else ""
+        
+        # যদি প্রথম পৃষ্ঠায় ৫০-এর কম অক্ষর থাকে, তাহলে স্ক্যান করা PDF ধরে OCR ব্যবহার
+        if len(first_page_text.strip()) < 50:
+            logger.info("📷 Detected scanned PDF, using OCR...")
+            if OCR_AVAILABLE:
+                return extract_text_from_pdf_bytes_ocr(pdf_bytes)
+            else:
+                logger.warning("⚠️ OCR not available, falling back to standard extraction")
+                return extract_text_from_pdf_bytes_advanced(pdf_bytes)
+        else:
+            logger.info("📄 Detected text-based PDF, using standard extraction...")
+            return extract_text_from_pdf_bytes_advanced(pdf_bytes)
+            
+    except Exception as e:
+        logger.warning(f"Auto-detect failed, falling back to standard: {e}")
+        return extract_text_from_pdf_bytes_advanced(pdf_bytes)
 
 def create_structured_chunks(structured_pages, filename):
     chunks = []
@@ -510,7 +602,7 @@ async def handle_drive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE
             archive_result = upload_to_archive(pdf_bytes, filename)
             archive_url = archive_result.get('url') if archive_result['success'] else None
             
-            structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
+            structured_pages = extract_text_from_pdf_bytes_auto(pdf_bytes)
             chunks = create_structured_chunks(structured_pages, filename)
             vector_count = save_structured_to_pinecone(filename, chunks)
             
@@ -578,7 +670,8 @@ async def handle_drive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status_msg.edit_text("⏳ PDF প্রক্রিয়াকরণ ও Pinecone-এ সংরক্ষণ করা হচ্ছে...")
         
-        structured_pages = extract_text_from_pdf_bytes_advanced(pdf_bytes)
+        # ✅ অটো-ডিটেক্ট OCR
+        structured_pages = extract_text_from_pdf_bytes_auto(pdf_bytes)
         chunks = create_structured_chunks(structured_pages, filename)
         vector_count = save_structured_to_pinecone(filename, chunks)
         
@@ -655,12 +748,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pc_status = "✅" if index is not None else "❌"
     hf_status = "✅" if hf_api is not None else "❌"
     ia_status = "✅" if IA_EMAIL and IA_PASSWORD else "❌"
+    ocr_status = "✅" if OCR_AVAILABLE else "❌"
     
     status_text = (
         f"📊 **সিস্টেম স্ট্যাটাস**\n\n"
         f"🗄️ Pinecone: {pc_status}\n"
         f"📚 Archive.org: {ia_status}\n"
         f"🔍 HF Tracking: {hf_status}\n"
+        f"📷 OCR: {ocr_status}\n"
         f"📁 ইনডেক্স: {PINECONE_INDEX_NAME}"
     )
     await update.message.reply_text(status_text, parse_mode="Markdown")
