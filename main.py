@@ -21,9 +21,9 @@ from sentence_transformers import SentenceTransformer
 from huggingface_hub import HfApi, login, hf_hub_download
 import logging
 
-# ✅ নতুন: Internet Archive লাইব্রেরি (লগইনের জন্য)
+# ✅ Internet Archive লাইব্রেরি (S3 কী এর জন্য)
 try:
-    from internetarchive import get_session
+    from internetarchive import configure, get_session
     IA_LIB_AVAILABLE = True
 except ImportError:
     IA_LIB_AVAILABLE = False
@@ -51,16 +51,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- কনফিগারেশন ---
-PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "")
+if not PINECONE_API_KEY:
+    PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
+
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quranqpf")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 IA_ACCOUNT_ID = os.environ.get("IA_ACCOUNT_ID", "ahashan_ahmed185")
 
-# ✅ নতুন: ইমেইল ও পাসওয়ার্ড এনভায়রনমেন্ট ভেরিয়েবল
-IA_EMAIL = os.environ.get("IA_EMAIL")
-IA_PASSWORD = os.environ.get("IA_PASSWORD")
+# ✅ S3 কী (সবচেয়ে নির্ভরযোগ্য)
+IA_S3_ACCESS = os.environ.get("IA_S3_ACCESS", "")
+IA_S3_SECRET = os.environ.get("IA_S3_SECRET", "")
 
-# HF ট্র্যাকিং রেপো
+# ব্যাকআপ: ইমেইল/পাসওয়ার্ড (S3 না থাকলে)
+IA_EMAIL = os.environ.get("IA_EMAIL", "")
+IA_PASSWORD = os.environ.get("IA_PASSWORD", "")
+
 HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
 
 # ✅ চেকপয়েন্ট ফাইল
@@ -81,7 +87,7 @@ index = None
 embedding_model = None
 hf_api = None
 pc = None
-ia_session = None  # ✅ নতুন: Internet Archive সেশন
+ia_session = None
 
 # --- চেকপয়েন্ট সিস্টেম ---
 def load_page_checkpoint():
@@ -126,7 +132,7 @@ def is_file_completed(file_hash):
     progress = get_file_progress(file_hash)
     return progress.get('completed', False)
 
-# --- Internet Archive লগইন (ইমেইল/পাসওয়ার্ড) ---
+# --- Internet Archive লগইন (S3 কী প্রাধান্য পাবে) ---
 def init_ia_session():
     global ia_session
     
@@ -134,29 +140,32 @@ def init_ia_session():
         logger.warning("⚠️ internetarchive library not installed. Only public items will be accessible.")
         return None
     
-    # সরাসরি os.environ থেকে পড়ুন
-    email = os.environ.get("IA_EMAIL")
-    password = os.environ.get("IA_PASSWORD")
+    # ✅ পদ্ধতি ১: S3 কী (সবচেয়ে নির্ভরযোগ্য)
+    if IA_S3_ACCESS and IA_S3_SECRET:
+        try:
+            logger.info("🔐 Logging into Internet Archive using S3 keys...")
+            configure(s3={'access': IA_S3_ACCESS, 'secret': IA_S3_SECRET})
+            ia_session = get_session()
+            logger.info("✅ Internet Archive login successful (S3 keys)")
+            return ia_session
+        except Exception as e:
+            logger.error(f"❌ S3 login failed: {e}")
     
-    if not email or not password:
-        logger.warning("⚠️ IA_EMAIL or IA_PASSWORD not set. Only public items will be accessible.")
-        return None
+    # ✅ পদ্ধতি ২: ইমেইল/পাসওয়ার্ড (ব্যাকআপ)
+    if IA_EMAIL and IA_PASSWORD:
+        try:
+            logger.info(f"🔐 Logging into Internet Archive using email...")
+            configure(IA_EMAIL, IA_PASSWORD)
+            ia_session = get_session()
+            logger.info("✅ Internet Archive login successful (email/password)")
+            return ia_session
+        except Exception as e:
+            logger.error(f"❌ Email login failed: {e}")
     
-    try:
-        logger.info(f"🔐 Logging into Internet Archive as: {email}")
-        from internetarchive import configure, get_session
-        configure(email, password)
-        ia_session = get_session()
-        # সেশন সঠিকভাবে কাজ করছে কিনা টেস্ট করুন
-        test = ia_session.get('https://archive.org/account/login.php')
-        if test.status_code == 200:
-            logger.info("✅ Internet Archive login successful")
-        else:
-            logger.warning("⚠️ Login may have issues, but continuing...")
-        return ia_session
-    except Exception as e:
-        logger.error(f"❌ Internet Archive login failed: {e}")
-        return None
+    logger.warning("⚠️ No valid credentials found. Only public items will be accessible.")
+    return None
+
+# --- Pinecone Initialization ---
 def init_pinecone():
     global pc, index, embedding_model
 
@@ -248,22 +257,16 @@ def get_file_hash(pdf_bytes):
     except:
         return f"{content_hash[:8]}_{file_size}"
 
-# --- Internet Archive Functions (হায়ারার্কি সহ - লগইন সেশন ব্যবহার) ---
+# --- Internet Archive Functions ---
 async def get_account_folders(account_id):
-    """
-    অ্যাকাউন্ট → ফোল্ডার (আইটেম) লিস্ট
-    লগইন সেশন থাকলে প্রাইভেট আইটেমও দেখাবে
-    """
+    """অ্যাকাউন্ট → ফোল্ডার (আইটেম) লিস্ট"""
     all_items = []
     
-    # যদি লগইন সেশন থাকে, তাহলে তা দিয়ে সার্চ করব
     if ia_session:
         try:
             logger.info(f"🔍 Searching with login for uploader:{account_id}")
             
-            # ✅ ভিন্ন পদ্ধতি: সরাসরি সেশন দিয়ে সার্চ
             def search_items():
-                # লগইন সেশন ব্যবহার করে সার্চ
                 search_result = ia_session.search_items(f'uploader:{account_id}')
                 return list(search_result)
             
@@ -278,31 +281,62 @@ async def get_account_folders(account_id):
             
             logger.info(f"📁 Found {len(all_items)} items (including private) using login")
             
-            # ✅ যদি কিছু না পাওয়া যায়, তাহলে আইটেম আইডি সরাসরি চেষ্টা করুন
             if len(all_items) == 0:
                 logger.info("🔄 No items found via search, trying direct item access...")
-                # আপনার জানা আইটেম আইডি চেষ্টা করুন
-                test_item = "4_20260415_20260415_1019"
-                try:
-                    item_metadata = await get_item_metadata(test_item)
-                    if item_metadata:
-                        all_items.append({
-                            'identifier': test_item,
-                            'title': item_metadata.get('title', test_item),
-                            'date': item_metadata.get('date', '')
-                        })
-                        logger.info(f"✅ Found item via direct access: {test_item}")
-                except Exception as e:
-                    logger.warning(f"Direct access failed: {e}")
+                # আপনার আইটেম আইডি যোগ করুন
+                test_items = ["4_20260415_20260415_1019"]
+                for test_item in test_items:
+                    try:
+                        item_metadata = await get_item_metadata(test_item)
+                        if item_metadata:
+                            all_items.append({
+                                'identifier': test_item,
+                                'title': item_metadata.get('title', test_item),
+                                'date': item_metadata.get('date', '')
+                            })
+                            logger.info(f"✅ Found item via direct access: {test_item}")
+                    except Exception as e:
+                        logger.warning(f"Direct access failed for {test_item}: {e}")
             
             return all_items
             
         except Exception as e:
             logger.warning(f"Login-based search failed: {e}, falling back to public API")
     
-    # ফ্যালব্যাক: পাবলিক API (শুধু পাবলিক আইটেম)
     logger.info("📁 Using public API (only public items)")
-    # ... বাকি কোড আগের মতো থাকবে
+    page = 1
+    folders = []
+    
+    while True:
+        url = f"https://archive.org/advancedsearch.php?q=uploader:{account_id}&output=json&rows=100&page={page}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            if response.status_code != 200:
+                break
+            
+            data = response.json()
+            items = data.get('response', {}).get('docs', [])
+            
+            if not items:
+                break
+            
+            for item in items:
+                folders.append({
+                    'identifier': item.get('identifier'),
+                    'title': item.get('title', item.get('identifier')),
+                    'date': item.get('date', '')
+                })
+            
+            total = data.get('response', {}).get('numFound', 0)
+            if len(folders) >= total:
+                break
+            
+            page += 1
+            await asyncio.sleep(0.5)
+    
+    return folders
+
 async def get_item_metadata(item_id):
     """একটি নির্দিষ্ট আইটেমের মেটাডেটা আনে"""
     metadata_url = f"https://archive.org/metadata/{item_id}"
@@ -312,24 +346,21 @@ async def get_item_metadata(item_id):
             data = response.json()
             return data.get('metadata', {})
     return None
-async def get_pdfs_from_folder(folder_identifier):
-    """
-    ফোল্ডার → আইটেম → PDF
-    একটি ফোল্ডার (আইটেম) থেকে সব PDF ফাইল বের করা
-    """
-    metadata_url = f"https://archive.org/metadata/{folder_identifier}"
 
+async def get_pdfs_from_folder(folder_identifier):
+    """ফোল্ডার → আইটেম → PDF"""
+    metadata_url = f"https://archive.org/metadata/{folder_identifier}"
+    
     async with httpx.AsyncClient() as client:
         response = await client.get(metadata_url)
         if response.status_code != 200:
             logger.error(f"Failed to fetch metadata for {folder_identifier}")
             return []
-
+        
         data = response.json()
-
         folder_title = data.get('metadata', {}).get('title', folder_identifier)
         files = data.get('files', [])
-
+        
         pdf_files = []
         for f in files:
             if f.get('name', '').endswith('.pdf'):
@@ -340,27 +371,43 @@ async def get_pdfs_from_folder(folder_identifier):
                     'folder_identifier': folder_identifier,
                     'folder_title': folder_title
                 })
-
+        
         return pdf_files
 
 async def download_pdf(url):
-    """PDF ডাউনলোড"""
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    """PDF ডাউনলোড - S3 সেশন ব্যবহার করে"""
+    if ia_session:
+        try:
+            def download_with_session():
+                # S3 সেশন ব্যবহার করে ডাউনলোড
+                response = ia_session.get(url, allow_redirects=True)
+                if response.status_code == 200:
+                    return response.content
+                else:
+                    raise Exception(f"HTTP {response.status_code}")
+            
+            content = await asyncio.to_thread(download_with_session)
+            return content
+        except Exception as e:
+            logger.warning(f"Session download failed: {e}, trying without session...")
+    
+    # ফ্যালব্যাক: সাধারণ HTTP ক্লায়েন্ট
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         response = await client.get(url)
         if response.status_code != 200:
             raise Exception(f"Download failed: {response.status_code}")
         return response.content
 
-# --- PDF Processing (পৃষ্ঠা-লেভেল চেকপয়েন্ট সহ) ---
+# --- PDF Processing ---
 def extract_text_from_page(doc, page_num):
     """একটি পৃষ্ঠা থেকে টেক্সট এক্সট্র্যাক্ট"""
     page = doc.load_page(page_num - 1)
     text = page.get_text("text")
-
+    
     if (not text or not text.strip()) and OCR_AVAILABLE:
         pix = page.get_pixmap(dpi=OCR_DPI)
         image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
+        
         try:
             text = pytesseract.image_to_string(image, lang=OCR_LANG_PRIMARY)
         except:
@@ -369,24 +416,24 @@ def extract_text_from_page(doc, page_num):
             image.close()
             del pix
             del image
-
+    
     del page
     return text
 
 def create_chunks(text, filename, page_num, book_name, volume_number=1):
     """টেক্সট থেকে চাঙ্ক তৈরি"""
     chunks = []
-
+    
     if not text or not text.strip():
         return chunks
-
+    
     paras = re.split(r'\n\s*\n', text)
-
+    
     for j, para in enumerate(paras):
         para = para.strip()
         if len(para) < 50:
             continue
-
+        
         chunks.append({
             'text': para,
             'metadata': {
@@ -398,26 +445,26 @@ def create_chunks(text, filename, page_num, book_name, volume_number=1):
                 'volume': volume_number
             }
         })
-
+    
     return chunks
 
 def save_to_pinecone(chunks, filename, page_num):
     """Pinecone-এ চাঙ্ক সংরক্ষণ"""
     global index, embedding_model
-
+    
     if not chunks:
         return 0
-
+    
     texts = [c['text'] for c in chunks]
     embeddings = embedding_model.encode(texts, batch_size=16, show_progress_bar=False)
     embeddings = embeddings.tolist()
-
+    
     vectors = []
     file_hash = hashlib.sha256(filename.encode()).hexdigest()[:8]
-
+    
     for j, (chunk, emb) in enumerate(zip(chunks, embeddings)):
         unique_id = f"{file_hash}_{page_num}_{j}_{uuid.uuid4().hex[:4]}"
-
+        
         vectors.append({
             'id': unique_id,
             'values': emb,
@@ -426,82 +473,77 @@ def save_to_pinecone(chunks, filename, page_num):
                 **chunk['metadata']
             }
         })
-
+    
     index.upsert(vectors=vectors)
     return len(vectors)
 
 async def process_single_pdf(pdf_info, folder_name):
     """একটি PDF প্রক্রিয়াকরণ"""
     logger.info(f"📄 Processing: {pdf_info['filename']} (from {folder_name})")
-
-    # ডাউনলোড
+    
     pdf_bytes = await download_pdf(pdf_info['url'])
     file_hash = get_file_hash(pdf_bytes)
-
-    # HF চেক
+    
     if check_file_already_uploaded(file_hash):
         logger.info(f"⏭️ Already fully uploaded: {pdf_info['filename']}")
         return {'status': 'skipped', 'reason': 'already_uploaded'}
-
-    # চেকপয়েন্ট চেক
+    
     if is_file_completed(file_hash):
         logger.info(f"⏭️ Already completed (checkpoint): {pdf_info['filename']}")
         return {'status': 'skipped', 'reason': 'checkpoint_completed'}
-
+    
     progress = get_file_progress(file_hash)
     start_page = progress.get('last_page', 0) + 1
-
-    # PDF খোলা
+    
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = len(doc)
-
+    
     if start_page > total_pages:
         logger.warning(f"Checkpoint page {start_page} exceeds total {total_pages}, restarting from 1")
         start_page = 1
-
+    
     if start_page > 1:
         logger.info(f"📌 Resuming from page {start_page}/{total_pages}")
-
+    
     update_file_progress(file_hash, start_page - 1, total_pages)
-
+    
     total_vectors = 0
-
-    # প্রতি পৃষ্ঠা প্রক্রিয়াকরণ
+    
     for page_num in range(start_page, total_pages + 1):
         text = extract_text_from_page(doc, page_num)
-
+        
         volume_number = 1
         match = re.search(r'[Vv]ol(?:ume)?\s*(\d+)', pdf_info['filename'])
         if match:
             volume_number = int(match.group(1))
-
+        
         chunks = create_chunks(text, pdf_info['filename'], page_num, folder_name, volume_number)
-
+        
         if chunks:
             uploaded = save_to_pinecone(chunks, pdf_info['filename'], page_num)
             total_vectors += uploaded
-
+        
         if page_num % 5 == 0 or page_num == total_pages:
             update_file_progress(file_hash, page_num, total_pages)
             logger.info(f"   💾 Checkpoint: page {page_num}/{total_pages}")
-
+        
         if page_num % 10 == 0:
             logger.info(f"   📄 Page {page_num}/{total_pages}")
             gc.collect()
-
+    
     doc.close()
-
+    
     update_file_progress(file_hash, total_pages, total_pages, completed=True)
-
+    
     size_mb = len(pdf_bytes) / (1024 * 1024)
     volume_info = {
         'folder_name': folder_name,
         'filename': pdf_info['filename']
     }
     mark_file_as_uploaded(pdf_info['filename'], file_hash, total_pages, total_vectors, size_mb, volume_info)
-
+    
     logger.info(f"✅ Completed: {pdf_info['filename']} ({total_pages} pages, {total_vectors} vectors)")
-
+    
     return {
         'status': 'success',
         'pages': total_pages,
@@ -510,96 +552,97 @@ async def process_single_pdf(pdf_info, folder_name):
         'resumed_from': start_page
     }
 
-# --- মেইন ফাংশন (হায়ারার্কি সহ) ---
+# --- মেইন ফাংশন ---
 async def main():
     """মেইন প্রক্রিয়া: অ্যাকাউন্ট → ফোল্ডার → PDF"""
     logger.info("=" * 60)
     logger.info("🚀 Internet Archive PDF Processor - GitHub Actions Cron")
     logger.info(f"📁 Checkpoint dir: {CHECKPOINT_DIR}")
     logger.info("=" * 60)
-
-    # ✅ Internet Archive লগইন (ইমেইল/পাসওয়ার্ড থাকলে)
+    
+    global ia_session, hf_api
+    
+    # Internet Archive লগইন (S3 কী প্রাধান্য পাবে)
     init_ia_session()
-
+    
     # HF Login
     if HF_TOKEN:
         login(token=HF_TOKEN)
-        global hf_api
         hf_api = HfApi(token=HF_TOKEN)
         logger.info("✅ Hugging Face logged in")
-
+    
     # Pinecone Init
     init_pinecone()
-
-    # ✅ ধাপ ১: অ্যাকাউন্ট থেকে সব ফোল্ডার (আইটেম) বের করা
+    
+    # ধাপ ১: অ্যাকাউন্ট থেকে সব ফোল্ডার
     logger.info(f"🔍 Scanning IA account: {IA_ACCOUNT_ID}")
     folders = await get_account_folders(IA_ACCOUNT_ID)
     logger.info(f"📁 Found {len(folders)} folders/items")
-
+    
     if not folders:
         logger.error("❌ No folders found! Check your IA_ACCOUNT_ID and credentials.")
         logger.info("💡 Make sure your IA_ACCOUNT_ID is correct and items are either public or you have set IA_EMAIL/IA_PASSWORD for private items.")
         return
-
-    # ✅ ধাপ ২: প্রতিটি ফোল্ডার থেকে PDF বের করা
+    
+    # ধাপ ২: প্রতিটি ফোল্ডার থেকে PDF
     all_pdfs = []
-
+    
     for folder in folders:
         folder_id = folder['identifier']
         folder_title = folder['title']
-
+        
         logger.info(f"📂 Processing folder: {folder_title} ({folder_id})")
-
+        
         pdfs = await get_pdfs_from_folder(folder_id)
-
+        
         for pdf in pdfs:
             pdf['folder_title'] = folder_title
             all_pdfs.append(pdf)
-
+        
         logger.info(f"   📄 Found {len(pdfs)} PDFs in this folder")
-
+    
     logger.info(f"📊 Total PDFs found: {len(all_pdfs)}")
-
-    # ✅ চেকপয়েন্ট ও HF হিস্টরি
+    
+    # চেকপয়েন্ট ও HF হিস্টরি
     checkpoint = load_page_checkpoint()
     logger.info(f"💾 Checkpoint has {len(checkpoint)} entries")
-
+    
     history = load_upload_history()
     logger.info(f"📋 HF history has {len(history.get('files', {}))} entries")
-
-    # ✅ নতুন PDF ফিল্টার
+    
+    # নতুন PDF ফিল্টার
     pending_pdfs = []
-
+    
     for pdf in all_pdfs:
         temp_hash = hashlib.md5(f"{pdf['filename']}_{pdf['size']}".encode()).hexdigest()
-
+        
         if temp_hash in history.get('files', {}):
             logger.info(f"⏭️ Skipping (HF): {pdf['filename']}")
             continue
-
+        
         progress = get_file_progress(temp_hash)
         if progress.get('completed', False):
             logger.info(f"⏭️ Skipping (checkpoint): {pdf['filename']}")
             continue
-
+        
         pending_pdfs.append(pdf)
-
+    
     logger.info(f"🆕 Pending PDFs: {len(pending_pdfs)}")
-
+    
     if not pending_pdfs:
         logger.info("✅ No pending PDFs found. Exiting.")
         return
-
-    # ✅ একে একে প্রক্রিয়াকরণ
+    
+    # একে একে প্রক্রিয়াকরণ
     processed = 0
     failed = 0
     skipped = 0
     resumed = 0
-
+    
     for pdf in pending_pdfs:
         try:
             result = await process_single_pdf(pdf, pdf['folder_title'])
-
+            
             if result['status'] == 'success':
                 processed += 1
                 if result.get('resumed_from', 1) > 1:
@@ -608,13 +651,13 @@ async def main():
                 skipped += 1
             else:
                 failed += 1
-
+        
         except Exception as e:
             logger.error(f"❌ Failed: {pdf['filename']} - {e}")
             failed += 1
-
+        
         await asyncio.sleep(1)
-
+    
     # ফাইনাল রিপোর্ট
     logger.info("=" * 60)
     logger.info("📊 FINAL REPORT")
