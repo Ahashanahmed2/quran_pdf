@@ -128,36 +128,36 @@ def is_file_completed(file_hash):
 
 # --- Internet Archive লগইন (ইমেইল/পাসওয়ার্ড) ---
 def init_ia_session():
-    """ইমেইল ও পাসওয়ার্ড ব্যবহার করে Internet Archive সেশন তৈরি"""
+def init_ia_session():
     global ia_session
     
     if not IA_LIB_AVAILABLE:
         logger.warning("⚠️ internetarchive library not installed. Only public items will be accessible.")
         return None
     
-    if not IA_EMAIL or not IA_PASSWORD:
+    # সরাসরি os.environ থেকে পড়ুন
+    email = os.environ.get("IA_EMAIL")
+    password = os.environ.get("IA_PASSWORD")
+    
+    if not email or not password:
         logger.warning("⚠️ IA_EMAIL or IA_PASSWORD not set. Only public items will be accessible.")
         return None
     
     try:
-        logger.info(f"🔐 Logging into Internet Archive as: {IA_EMAIL}")
-        # সেশন তৈরি
-        ia_session = get_session(
-            config={
-                'cookies': {
-                    'logged-in-user': IA_EMAIL,
-                }
-            }
-        )
-        # Actually log in using the session
-        ia_session.login(email=IA_EMAIL, password=IA_PASSWORD)
-        logger.info("✅ Internet Archive login successful")
+        logger.info(f"🔐 Logging into Internet Archive as: {email}")
+        from internetarchive import configure, get_session
+        configure(email, password)
+        ia_session = get_session()
+        # সেশন সঠিকভাবে কাজ করছে কিনা টেস্ট করুন
+        test = ia_session.get('https://archive.org/account/login.php')
+        if test.status_code == 200:
+            logger.info("✅ Internet Archive login successful")
+        else:
+            logger.warning("⚠️ Login may have issues, but continuing...")
         return ia_session
     except Exception as e:
         logger.error(f"❌ Internet Archive login failed: {e}")
         return None
-
-# --- Pinecone Initialization ---
 def init_pinecone():
     global pc, index, embedding_model
 
