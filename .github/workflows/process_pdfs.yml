@@ -1,0 +1,57 @@
+name: Process PDFs from Internet Archive
+
+on:
+  schedule:
+    #- cron: '* * * * *'
+  workflow_dispatch:
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download previous checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: page-checkpoints
+          path: /tmp/checkpoints
+        continue-on-error: true
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-ben tesseract-ocr-ara tesseract-ocr-eng poppler-utils
+      
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run PDF Processor
+        env:
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          IA_ACCOUNT_ID: ${{ secrets.IA_ACCOUNT_ID }}
+        run: python main.py
+      
+      - name: Upload checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-checkpoints
+          path: /tmp/checkpoints/
+          retention-days: 7
+      
+      - name: Upload tracking file
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracking-data
+          path: /tmp/uploaded_files.json
+          retention-days: 7
