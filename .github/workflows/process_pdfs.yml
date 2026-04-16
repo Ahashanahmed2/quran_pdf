@@ -40,7 +40,10 @@ jobs:
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           IA_ACCOUNT_ID: ${{ secrets.IA_ACCOUNT_ID }}
-        run: python main.py
+          IA_EMAIL: ${{ secrets.IA_EMAIL }}          # ✅ যোগ করুন
+          IA_PASSWORD: ${{ secrets.IA_PASSWORD }}    # ✅ যোগ করুন
+        run: 
+          python main.py
       
       - name: Upload checkpoint
         uses: actions/upload-artifact@v4
@@ -53,5 +56,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tracking-data
-          path: /tmp/uploaded_files.json
+          path: /tmp/uploaded_files.Procles.j
           retention-days: 7
