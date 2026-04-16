@@ -9,3 +9,4 @@ pillow==11.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.9.0+cpu
 internetarchive
+requests
