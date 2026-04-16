@@ -29,13 +29,12 @@ except ImportError:
     IA_LIB_AVAILABLE = False
     print("⚠️ internetarchive library not available. Install: pip install internetarchive")
 
-# ✅ OCR লাইব্রেরি
+# ✅ EasyOCR লাইব্রেরি (বাংলা/আরবির জন্য)
 try:
-    import pytesseract
+    import easyocr
+    import numpy as np
     from PIL import Image
     import fitz  # PyMuPDF
-    import cv2
-    import numpy as np
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -76,10 +75,6 @@ CHECKPOINT_DIR = Path("/tmp/checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 PAGE_CHECKPOINT_FILE = CHECKPOINT_DIR / "page_checkpoint.json"
 
-# ✅ OCR কনফিগারেশন (আপডেটেড)
-OCR_DPI = 300  # 200 থেকে বাড়ানো হয়েছে
-OCR_LANG_PRIMARY = "ben+ara+eng"  # তিনটি ভাষা
-
 # ✅ ব্যাচ সাইজ
 PINECONE_BATCH_SIZE = 10
 
@@ -89,10 +84,7 @@ embedding_model = None
 hf_api = None
 pc = None
 ia_session = None
-
-# ✅ Tesseract পাথ সেট করুন
-if OCR_AVAILABLE:
-    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+ocr_reader = None  # EasyOCR রিডার
 
 # --- চেকপয়েন্ট সিস্টেম ---
 def load_page_checkpoint():
@@ -137,7 +129,22 @@ def is_file_completed(file_hash):
     progress = get_file_progress(file_hash)
     return progress.get('completed', False)
 
-# --- Internet Archive লগইন (S3 কী প্রাধান্য পাবে) ---
+# --- EasyOCR ইনিশিয়ালাইজেশন ---
+def get_ocr_reader():
+    """EasyOCR রিডার তৈরি বা রিটার্ন করে"""
+    global ocr_reader
+    if ocr_reader is None and OCR_AVAILABLE:
+        try:
+            logger.info("🔧 Initializing EasyOCR reader for Bengali, Arabic, and English...")
+            # বাংলা, আরবি, ইংরেজি ভাষা সাপোর্ট
+            ocr_reader = easyocr.Reader(['bn', 'ar', 'en'], gpu=False, verbose=False)
+            logger.info("✅ EasyOCR reader initialized successfully.")
+        except Exception as e:
+            logger.error(f"❌ EasyOCR initialization failed: {e}")
+            return None
+    return ocr_reader
+
+# --- Internet Archive লগইন ---
 def init_ia_session():
     global ia_session
     
@@ -149,14 +156,7 @@ def init_ia_session():
     if IA_S3_ACCESS and IA_S3_SECRET:
         try:
             logger.info("🔐 Logging into Internet Archive using S3 keys...")
-            # S3 কনফিগারেশনের সঠিক সিনট্যাক্স
-            config = {
-                's3': {
-                    'access': IA_S3_ACCESS,
-                    'secret': IA_S3_SECRET
-                }
-            }
-            configure(**config)
+            configure(access_key=IA_S3_ACCESS, secret_key=IA_S3_SECRET)
             ia_session = get_session()
             logger.info("✅ Internet Archive login successful (S3 keys)")
             return ia_session
@@ -408,45 +408,40 @@ async def download_pdf(url):
             raise Exception(f"Download failed: {response.status_code}")
         return response.content
 
-# --- PDF Processing (আপডেটেড OCR সহ) ---
+# --- PDF Processing (EasyOCR সহ) ---
 def extract_text_from_page(doc, page_num):
-    """একটি পৃষ্ঠা থেকে টেক্সট এক্সট্র্যাক্ট - OCR ব্যাকআপ সহ"""
+    """একটি পৃষ্ঠা থেকে টেক্সট এক্সট্র্যাক্ট - EasyOCR ব্যবহার করে"""
     page = doc.load_page(page_num - 1)
     text = page.get_text("text")
     
-    # যদি সরাসরি টেক্সট না পাওয়া যায়, তাহলে OCR চেষ্টা করবে
+    # যদি সরাসরি টেক্সট না পাওয়া যায়, তাহলে EasyOCR চেষ্টা করবে
     if not text or not text.strip():
-        logger.info(f"   📄 Page {page_num}: No direct text, trying OCR...")
+        logger.info(f"   📄 Page {page_num}: No direct text, trying EasyOCR...")
         if OCR_AVAILABLE:
             try:
-                # উচ্চ রেজোলিউশনে ইমেজ নেওয়া
-                zoom = OCR_DPI / 72
+                # পৃষ্ঠাটি ইমেজে রূপান্তর (200 DPI যথেষ্ট)
+                zoom = 200 / 72
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                img_np = np.array(img)
                 
-                # ইমেজ প্রি-প্রসেসিং (বাংলা/আরবির জন্য)
-                open_cv_image = np.array(img)
-                gray = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2GRAY)
-                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-                preprocessed_img = Image.fromarray(thresh)
+                # EasyOCR রিডার পেয়ে টেক্সট বের করা
+                reader = get_ocr_reader()
+                if reader:
+                    result = reader.readtext(img_np, detail=0, paragraph=True)
+                    text = "\n".join(result)
+                    logger.info(f"   ✅ Page {page_num}: EasyOCR complete, text length: {len(text)}")
+                    if len(text) < 30:
+                        logger.warning(f"   ⚠️ Page {page_num}: EasyOCR got very little text")
+                else:
+                    logger.warning(f"   ⚠️ Page {page_num}: EasyOCR reader not available")
                 
-                # Tesseract OCR
-                custom_config = r'--oem 3 --psm 6'
-                text = pytesseract.image_to_string(
-                    preprocessed_img,
-                    lang=OCR_LANG_PRIMARY,
-                    config=custom_config
-                )
-                
-                logger.info(f"   ✅ Page {page_num}: OCR complete, text length: {len(text)}")
-                
-                # ক্লিনআপ
                 img.close()
                 del pix
                 
             except Exception as e:
-                logger.warning(f"   ⚠️ Page {page_num}: OCR failed - {e}")
+                logger.warning(f"   ⚠️ Page {page_num}: EasyOCR failed - {e}")
                 text = ""
         else:
             logger.warning(f"   ⚠️ Page {page_num}: OCR not available")
@@ -505,7 +500,7 @@ def save_to_pinecone(chunks, filename, page_num):
             'id': unique_id,
             'values': emb,
             'metadata': {
-                'text': chunk['text'][:200],  # প্রথম ২০০ অক্ষর মেটাডেটায়
+                'text': chunk['text'][:500],  # প্রথম ৫০০ অক্ষর মেটাডেটায়
                 **chunk['metadata']
             }
         })
@@ -603,14 +598,17 @@ async def main():
     logger.info("=" * 60)
     logger.info("🚀 Internet Archive PDF Processor - GitHub Actions Cron")
     logger.info(f"📁 Checkpoint dir: {CHECKPOINT_DIR}")
-    logger.info(f"🔧 OCR Language: {OCR_LANG_PRIMARY}")
-    logger.info(f"🔧 OCR DPI: {OCR_DPI}")
+    logger.info(f"🔧 OCR Engine: EasyOCR (Bengali/Arabic/English)")
     logger.info("=" * 60)
     
     global ia_session, hf_api
     
     # Internet Archive লগইন
     init_ia_session()
+    
+    # EasyOCR প্রি-লোড (যাতে পরে সময় না লাগে)
+    if OCR_AVAILABLE:
+        get_ocr_reader()
     
     # HF Login
     if HF_TOKEN:
