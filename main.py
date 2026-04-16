@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Internet Archive PDF Processor - GitHub Actions Cron Job
-পৃষ্ঠা-লেভেল চেকপয়েন্ট সহ
+হায়ারার্কি: অ্যাকাউন্ট → ফোল্ডার → আইটেম → PDF
 """
 
 import os
@@ -50,7 +50,7 @@ IA_ACCOUNT_ID = os.environ.get("IA_ACCOUNT_ID", "ahashan_ahmed185")
 
 HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
 
-# ✅ চেকপয়েন্ট ফাইল (GitHub Actions Artifact-এর জন্য)
+# ✅ চেকপয়েন্ট ফাইল
 CHECKPOINT_DIR = Path("/tmp/checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 PAGE_CHECKPOINT_FILE = CHECKPOINT_DIR / "page_checkpoint.json"
@@ -69,15 +69,15 @@ embedding_model = None
 hf_api = None
 pc = None
 
-# --- চেকপয়েন্ট সিস্টেম (পৃষ্ঠা-লেভেল) ---
+# --- চেকপয়েন্ট সিস্টেম ---
 def load_page_checkpoint():
     """পৃষ্ঠা চেকপয়েন্ট লোড"""
     try:
         if PAGE_CHECKPOINT_FILE.exists():
             with open(PAGE_CHECKPOINT_FILE, 'r') as f:
                 return json.load(f)
-    except Exception as e:
-        logger.warning(f"Failed to load checkpoint: {e}")
+    except:
+        pass
     return {}
 
 def save_page_checkpoint(checkpoint):
@@ -85,8 +85,8 @@ def save_page_checkpoint(checkpoint):
     try:
         with open(PAGE_CHECKPOINT_FILE, 'w') as f:
             json.dump(checkpoint, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to save checkpoint: {e}")
+    except:
+        pass
 
 def get_file_progress(file_hash):
     """নির্দিষ্ট ফাইলের অগ্রগতি"""
@@ -96,7 +96,6 @@ def get_file_progress(file_hash):
 def update_file_progress(file_hash, page_num, total_pages=None, completed=False):
     """ফাইলের অগ্রগতি আপডেট"""
     checkpoint = load_page_checkpoint()
-    
     existing = checkpoint.get(file_hash, {})
     
     checkpoint[file_hash] = {
@@ -133,7 +132,7 @@ def init_pinecone():
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     logger.info("✅ Pinecone ready")
 
-# --- HF Tracking (ফাইল-লেভেল) ---
+# --- HF Tracking ---
 def load_upload_history():
     """HF থেকে আপলোড ইতিহাস লোড"""
     try:
@@ -205,9 +204,12 @@ def get_file_hash(pdf_bytes):
     except:
         return f"{content_hash[:8]}_{file_size}"
 
-# --- Internet Archive Functions ---
-async def get_all_items_from_account(account_id):
-    """IA অ্যাকাউন্টের সব আইটেম (Pagination সহ)"""
+# --- Internet Archive Functions (হায়ারার্কি সহ) ---
+async def get_account_folders(account_id):
+    """
+    অ্যাকাউন্ট → ফোল্ডার (আইটেম) লিস্ট
+    IA-তে "ফোল্ডার" বলতে কিছু নেই, প্রতিটি আপলোডই একটি "আইটেম"
+    """
     all_items = []
     page = 1
     
@@ -234,18 +236,35 @@ async def get_all_items_from_account(account_id):
             page += 1
             await asyncio.sleep(0.5)
     
-    return all_items
+    # প্রতিটি আইটেমকে একটি "ফোল্ডার" হিসেবে ধরা
+    folders = []
+    for item in all_items:
+        folders.append({
+            'identifier': item.get('identifier'),
+            'title': item.get('title', item.get('identifier')),
+            'date': item.get('date', '')
+        })
+    
+    return folders
 
-async def get_pdfs_from_item(identifier):
-    """একটি আইটেম থেকে সব PDF বের করা"""
-    url = f"https://archive.org/metadata/{identifier}"
+async def get_pdfs_from_folder(folder_identifier):
+    """
+    ফোল্ডার → আইটেম → PDF
+    একটি ফোল্ডার (আইটেম) থেকে সব PDF ফাইল বের করা
+    """
+    metadata_url = f"https://archive.org/metadata/{folder_identifier}"
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(url)
+        response = await client.get(metadata_url)
         if response.status_code != 200:
+            logger.error(f"Failed to fetch metadata for {folder_identifier}")
             return []
         
         data = response.json()
+        
+        # ফোল্ডারের মেটাডেটা থেকে নাম বের করা
+        folder_title = data.get('metadata', {}).get('title', folder_identifier)
+        
         files = data.get('files', [])
         
         pdf_files = []
@@ -253,9 +272,10 @@ async def get_pdfs_from_item(identifier):
             if f.get('name', '').endswith('.pdf'):
                 pdf_files.append({
                     'filename': f['name'],
-                    'url': f"https://archive.org/download/{identifier}/{f['name']}",
+                    'url': f"https://archive.org/download/{folder_identifier}/{f['name']}",
                     'size': f.get('size', 0),
-                    'identifier': identifier
+                    'folder_identifier': folder_identifier,
+                    'folder_title': folder_title
                 })
         
         return pdf_files
@@ -297,7 +317,6 @@ def create_chunks(text, filename, page_num, book_name, volume_number=1):
     if not text or not text.strip():
         return chunks
     
-    # প্যারাগ্রাফে ভাগ
     paras = re.split(r'\n\s*\n', text)
     
     for j, para in enumerate(paras):
@@ -348,20 +367,20 @@ def save_to_pinecone(chunks, filename, page_num):
     index.upsert(vectors=vectors)
     return len(vectors)
 
-async def process_single_pdf(pdf_info, book_name):
-    """একটি PDF প্রক্রিয়াকরণ (পৃষ্ঠা-লেভেল চেকপয়েন্ট সহ)"""
-    logger.info(f"📄 Processing: {pdf_info['filename']}")
+async def process_single_pdf(pdf_info, folder_name):
+    """একটি PDF প্রক্রিয়াকরণ"""
+    logger.info(f"📄 Processing: {pdf_info['filename']} (from {folder_name})")
     
     # ডাউনলোড
     pdf_bytes = await download_pdf(pdf_info['url'])
     file_hash = get_file_hash(pdf_bytes)
     
-    # ✅ HF চেক (ফাইল-লেভেল)
+    # HF চেক
     if check_file_already_uploaded(file_hash):
         logger.info(f"⏭️ Already fully uploaded: {pdf_info['filename']}")
         return {'status': 'skipped', 'reason': 'already_uploaded'}
     
-    # ✅ চেকপয়েন্ট চেক (পৃষ্ঠা-লেভেল)
+    # চেকপয়েন্ট চেক
     if is_file_completed(file_hash):
         logger.info(f"⏭️ Already completed (checkpoint): {pdf_info['filename']}")
         return {'status': 'skipped', 'reason': 'checkpoint_completed'}
@@ -378,9 +397,8 @@ async def process_single_pdf(pdf_info, book_name):
         start_page = 1
     
     if start_page > 1:
-        logger.info(f"📌 Resuming from page {start_page}/{total_pages} (checkpoint)")
+        logger.info(f"📌 Resuming from page {start_page}/{total_pages}")
     
-    # ✅ চেকপয়েন্টে total_pages আপডেট
     update_file_progress(file_hash, start_page - 1, total_pages)
     
     total_vectors = 0
@@ -389,19 +407,17 @@ async def process_single_pdf(pdf_info, book_name):
     for page_num in range(start_page, total_pages + 1):
         text = extract_text_from_page(doc, page_num)
         
-        # ভলিউম নম্বর বের করার চেষ্টা
         volume_number = 1
         match = re.search(r'[Vv]ol(?:ume)?\s*(\d+)', pdf_info['filename'])
         if match:
             volume_number = int(match.group(1))
         
-        chunks = create_chunks(text, pdf_info['filename'], page_num, book_name, volume_number)
+        chunks = create_chunks(text, pdf_info['filename'], page_num, folder_name, volume_number)
         
         if chunks:
             uploaded = save_to_pinecone(chunks, pdf_info['filename'], page_num)
             total_vectors += uploaded
         
-        # ✅ প্রতি ৫ পৃষ্ঠা পর চেকপয়েন্ট আপডেট
         if page_num % 5 == 0 or page_num == total_pages:
             update_file_progress(file_hash, page_num, total_pages)
             logger.info(f"   💾 Checkpoint: page {page_num}/{total_pages}")
@@ -412,13 +428,11 @@ async def process_single_pdf(pdf_info, book_name):
     
     doc.close()
     
-    # ✅ সম্পূর্ণ হলে চেকপয়েন্ট মার্ক
     update_file_progress(file_hash, total_pages, total_pages, completed=True)
     
-    # HF-এ মার্ক
     size_mb = len(pdf_bytes) / (1024 * 1024)
     volume_info = {
-        'book_name': book_name,
+        'folder_name': folder_name,
         'filename': pdf_info['filename']
     }
     mark_file_as_uploaded(pdf_info['filename'], file_hash, total_pages, total_vectors, size_mb, volume_info)
@@ -433,9 +447,9 @@ async def process_single_pdf(pdf_info, book_name):
         'resumed_from': start_page
     }
 
-# --- মেইন ফাংশন ---
+# --- মেইন ফাংশন (হায়ারার্কি সহ) ---
 async def main():
-    """মেইন প্রক্রিয়া"""
+    """মেইন প্রক্রিয়া: অ্যাকাউন্ট → ফোল্ডার → PDF"""
     logger.info("=" * 60)
     logger.info("🚀 Internet Archive PDF Processor - GitHub Actions Cron")
     logger.info(f"📁 Checkpoint dir: {CHECKPOINT_DIR}")
@@ -451,49 +465,54 @@ async def main():
     # Pinecone Init
     init_pinecone()
     
-    # IA থেকে সব আইটেম আনুন
+    # ✅ ধাপ ১: অ্যাকাউন্ট থেকে সব ফোল্ডার (আইটেম) বের করা
     logger.info(f"🔍 Scanning IA account: {IA_ACCOUNT_ID}")
-    items = await get_all_items_from_account(IA_ACCOUNT_ID)
-    logger.info(f"📚 Found {len(items)} items")
+    folders = await get_account_folders(IA_ACCOUNT_ID)
+    logger.info(f"📁 Found {len(folders)} folders/items")
     
-    # নতুন PDF খুঁজুন
+    if not folders:
+        logger.error("❌ No folders found! Check your IA_ACCOUNT_ID.")
+        return
+    
+    # ✅ ধাপ ২: প্রতিটি ফোল্ডার থেকে PDF বের করা
     all_pdfs = []
-    for item in items:
-        identifier = item.get('identifier')
-        title = item.get('title', identifier)
+    
+    for folder in folders:
+        folder_id = folder['identifier']
+        folder_title = folder['title']
         
-        # বইয়ের নাম বের করুন
-        book_name = title.split(' - ')[0] if ' - ' in title else title
+        logger.info(f"📂 Processing folder: {folder_title} ({folder_id})")
         
-        pdfs = await get_pdfs_from_item(identifier)
+        pdfs = await get_pdfs_from_folder(folder_id)
+        
         for pdf in pdfs:
-            pdf['book_name'] = book_name
+            pdf['folder_title'] = folder_title
             all_pdfs.append(pdf)
+        
+        logger.info(f"   📄 Found {len(pdfs)} PDFs in this folder")
     
-    logger.info(f"📄 Total PDFs found: {len(all_pdfs)}")
+    logger.info(f"📊 Total PDFs found: {len(all_pdfs)}")
     
-    # ✅ চেকপয়েন্ট দেখুন
+    # ✅ চেকপয়েন্ট ও HF হিস্টরি
     checkpoint = load_page_checkpoint()
     logger.info(f"💾 Checkpoint has {len(checkpoint)} entries")
     
-    # HF হিস্টরি দেখুন
     history = load_upload_history()
     logger.info(f"📋 HF history has {len(history.get('files', {}))} entries")
     
-    # নতুন PDF ফিল্টার (HF-এ নেই বা চেকপয়েন্টে incomplete)
+    # ✅ নতুন PDF ফিল্টার
     pending_pdfs = []
     
     for pdf in all_pdfs:
-        # দ্রুত হ্যাশ (শুধু চেক করার জন্য)
         temp_hash = hashlib.md5(f"{pdf['filename']}_{pdf['size']}".encode()).hexdigest()
         
-        # HF-এ আছে?
         if temp_hash in history.get('files', {}):
+            logger.info(f"⏭️ Skipping (HF): {pdf['filename']}")
             continue
         
-        # চেকপয়েন্টে incomplete?
         progress = get_file_progress(temp_hash)
         if progress.get('completed', False):
+            logger.info(f"⏭️ Skipping (checkpoint): {pdf['filename']}")
             continue
         
         pending_pdfs.append(pdf)
@@ -502,17 +521,9 @@ async def main():
     
     if not pending_pdfs:
         logger.info("✅ No pending PDFs found. Exiting.")
-        
-        # চেকপয়েন্ট স্ট্যাটাস দেখান
-        incomplete = {k: v for k, v in checkpoint.items() if not v.get('completed', False)}
-        if incomplete:
-            logger.info(f"⚠️ Incomplete checkpoints: {len(incomplete)}")
-            for k, v in incomplete.items():
-                logger.info(f"   - {k}: page {v['last_page']}/{v.get('total_pages', '?')}")
-        
         return
     
-    # একে একে প্রক্রিয়াকরণ
+    # ✅ একে একে প্রক্রিয়াকরণ
     processed = 0
     failed = 0
     skipped = 0
@@ -520,7 +531,7 @@ async def main():
     
     for pdf in pending_pdfs:
         try:
-            result = await process_single_pdf(pdf, pdf['book_name'])
+            result = await process_single_pdf(pdf, pdf['folder_title'])
             
             if result['status'] == 'success':
                 processed += 1
@@ -547,14 +558,6 @@ async def main():
     logger.info(f"💾 Checkpoint entries: {len(load_page_checkpoint())}")
     logger.info(f"📁 HF tracking entries: {len(load_upload_history().get('files', {}))}")
     logger.info("=" * 60)
-    
-    # চেকপয়েন্ট স্ট্যাটাস
-    checkpoint = load_page_checkpoint()
-    incomplete = {k: v for k, v in checkpoint.items() if not v.get('completed', False)}
-    if incomplete:
-        logger.info(f"⚠️ Incomplete files (will resume next run): {len(incomplete)}")
-        for k, v in incomplete.items():
-            logger.info(f"   - {k}: page {v['last_page']}/{v.get('total_pages', '?')}")
 
 if __name__ == "__main__":
     asyncio.run(main())
