@@ -1,16 +1,10 @@
-fastapi==0.115.11
-uvicorn==0.34.0
-python-telegram-bot==21.0.1
+httpx==0.28.1
 pypdf==5.1.0
 pinecone-client==5.0.1
-requests==2.32.3
-pillow==11.0.0
 sentence-transformers==2.7.0
 huggingface-hub==0.26.2
+pytesseract==0.3.13
+PyMuPDF==1.25.0
+pillow==11.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.9.0+cpu
-internetarchive==5.0.0
-pytesseract==0.3.13
-pdf2image==1.17.0
-slowapi==0.1.9
-httpx==0.28.1
