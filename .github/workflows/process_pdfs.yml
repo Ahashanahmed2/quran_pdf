@@ -2,7 +2,7 @@ name: Process PDF
 
 on:
   schedule:
-  #- cron: '* * * * *'
+  #- cron: '30 10 * * *'
   workflow_dispatch:
 
 jobs:
