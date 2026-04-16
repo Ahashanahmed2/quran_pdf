@@ -128,7 +128,6 @@ def is_file_completed(file_hash):
 
 # --- Internet Archive লগইন (ইমেইল/পাসওয়ার্ড) ---
 def init_ia_session():
-def init_ia_session():
     global ia_session
     
     if not IA_LIB_AVAILABLE:
