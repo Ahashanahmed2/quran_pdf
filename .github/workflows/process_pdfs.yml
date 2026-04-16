@@ -42,6 +42,8 @@ jobs:
           IA_ACCOUNT_ID: ${{ secrets.IA_ACCOUNT_ID }}
           IA_EMAIL: ${{ secrets.IA_EMAIL }}          # ✅ যোগ করুন
           IA_PASSWORD: ${{ secrets.IA_PASSWORD }}    # ✅ যোগ করুন
+          IA_S3_ACCESS: ${{ secrets.IA_S3_ACCESS }}
+          IA_S3_SECRET: ${{ secrets.IA_S3_SECRET }}
         run: 
           python main.py
       
