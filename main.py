@@ -34,6 +34,8 @@ try:
     import pytesseract
     from PIL import Image
     import fitz  # PyMuPDF
+    import cv2
+    import numpy as np
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -59,7 +61,7 @@ PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quranqpf")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 IA_ACCOUNT_ID = os.environ.get("IA_ACCOUNT_ID", "ahashan_ahmed185")
 
-# ✅ S3 কী (সবচেয়ে নির্ভরযোগ্য)
+# S3 কী (সবচেয়ে নির্ভরযোগ্য)
 IA_S3_ACCESS = os.environ.get("IA_S3_ACCESS", "")
 IA_S3_SECRET = os.environ.get("IA_S3_SECRET", "")
 
@@ -74,10 +76,9 @@ CHECKPOINT_DIR = Path("/tmp/checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 PAGE_CHECKPOINT_FILE = CHECKPOINT_DIR / "page_checkpoint.json"
 
-# ✅ OCR কনফিগারেশন
-OCR_DPI = 200
-OCR_LANG_PRIMARY = "ben+ara"
-OCR_TIMEOUT = 10
+# ✅ OCR কনফিগারেশন (আপডেটেড)
+OCR_DPI = 300  # 200 থেকে বাড়ানো হয়েছে
+OCR_LANG_PRIMARY = "ben+ara+eng"  # তিনটি ভাষা
 
 # ✅ ব্যাচ সাইজ
 PINECONE_BATCH_SIZE = 10
@@ -88,6 +89,10 @@ embedding_model = None
 hf_api = None
 pc = None
 ia_session = None
+
+# ✅ Tesseract পাথ সেট করুন
+if OCR_AVAILABLE:
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 # --- চেকপয়েন্ট সিস্টেম ---
 def load_page_checkpoint():
@@ -140,18 +145,25 @@ def init_ia_session():
         logger.warning("⚠️ internetarchive library not installed. Only public items will be accessible.")
         return None
     
-    # ✅ পদ্ধতি ১: S3 কী (সবচেয়ে নির্ভরযোগ্য)
+    # পদ্ধতি ১: S3 কী (সবচেয়ে নির্ভরযোগ্য)
     if IA_S3_ACCESS and IA_S3_SECRET:
         try:
             logger.info("🔐 Logging into Internet Archive using S3 keys...")
-            configure(s3={'access': IA_S3_ACCESS, 'secret': IA_S3_SECRET})
+            # S3 কনফিগারেশনের সঠিক সিনট্যাক্স
+            config = {
+                's3': {
+                    'access': IA_S3_ACCESS,
+                    'secret': IA_S3_SECRET
+                }
+            }
+            configure(**config)
             ia_session = get_session()
             logger.info("✅ Internet Archive login successful (S3 keys)")
             return ia_session
         except Exception as e:
             logger.error(f"❌ S3 login failed: {e}")
     
-    # ✅ পদ্ধতি ২: ইমেইল/পাসওয়ার্ড (ব্যাকআপ)
+    # পদ্ধতি ২: ইমেইল/পাসওয়ার্ড (ব্যাকআপ)
     if IA_EMAIL and IA_PASSWORD:
         try:
             logger.info(f"🔐 Logging into Internet Archive using email...")
@@ -375,11 +387,10 @@ async def get_pdfs_from_folder(folder_identifier):
         return pdf_files
 
 async def download_pdf(url):
-    """PDF ডাউনলোড - S3 সেশন ব্যবহার করে"""
+    """PDF ডাউনলোড - লগইন সেশন সহ"""
     if ia_session:
         try:
             def download_with_session():
-                # S3 সেশন ব্যবহার করে ডাউনলোড
                 response = ia_session.get(url, allow_redirects=True)
                 if response.status_code == 200:
                     return response.content
@@ -391,31 +402,54 @@ async def download_pdf(url):
         except Exception as e:
             logger.warning(f"Session download failed: {e}, trying without session...")
     
-    # ফ্যালব্যাক: সাধারণ HTTP ক্লায়েন্ট
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         response = await client.get(url)
         if response.status_code != 200:
             raise Exception(f"Download failed: {response.status_code}")
         return response.content
 
-# --- PDF Processing ---
+# --- PDF Processing (আপডেটেড OCR সহ) ---
 def extract_text_from_page(doc, page_num):
-    """একটি পৃষ্ঠা থেকে টেক্সট এক্সট্র্যাক্ট"""
+    """একটি পৃষ্ঠা থেকে টেক্সট এক্সট্র্যাক্ট - OCR ব্যাকআপ সহ"""
     page = doc.load_page(page_num - 1)
     text = page.get_text("text")
     
-    if (not text or not text.strip()) and OCR_AVAILABLE:
-        pix = page.get_pixmap(dpi=OCR_DPI)
-        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        
-        try:
-            text = pytesseract.image_to_string(image, lang=OCR_LANG_PRIMARY)
-        except:
-            text = ""
-        finally:
-            image.close()
-            del pix
-            del image
+    # যদি সরাসরি টেক্সট না পাওয়া যায়, তাহলে OCR চেষ্টা করবে
+    if not text or not text.strip():
+        logger.info(f"   📄 Page {page_num}: No direct text, trying OCR...")
+        if OCR_AVAILABLE:
+            try:
+                # উচ্চ রেজোলিউশনে ইমেজ নেওয়া
+                zoom = OCR_DPI / 72
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                
+                # ইমেজ প্রি-প্রসেসিং (বাংলা/আরবির জন্য)
+                open_cv_image = np.array(img)
+                gray = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2GRAY)
+                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+                preprocessed_img = Image.fromarray(thresh)
+                
+                # Tesseract OCR
+                custom_config = r'--oem 3 --psm 6'
+                text = pytesseract.image_to_string(
+                    preprocessed_img,
+                    lang=OCR_LANG_PRIMARY,
+                    config=custom_config
+                )
+                
+                logger.info(f"   ✅ Page {page_num}: OCR complete, text length: {len(text)}")
+                
+                # ক্লিনআপ
+                img.close()
+                del pix
+                
+            except Exception as e:
+                logger.warning(f"   ⚠️ Page {page_num}: OCR failed - {e}")
+                text = ""
+        else:
+            logger.warning(f"   ⚠️ Page {page_num}: OCR not available")
     
     del page
     return text
@@ -427,11 +461,13 @@ def create_chunks(text, filename, page_num, book_name, volume_number=1):
     if not text or not text.strip():
         return chunks
     
+    # প্যারাগ্রাফ স্প্লিট
     paras = re.split(r'\n\s*\n', text)
     
     for j, para in enumerate(paras):
         para = para.strip()
-        if len(para) < 50:
+        # মিনিমাম চাঙ্ক সাইজ ৩০ অক্ষর (বাংলার জন্য)
+        if len(para) < 30:
             continue
         
         chunks.append({
@@ -469,12 +505,16 @@ def save_to_pinecone(chunks, filename, page_num):
             'id': unique_id,
             'values': emb,
             'metadata': {
-                'text': chunk['text'][:200],
+                'text': chunk['text'][:200],  # প্রথম ২০০ অক্ষর মেটাডেটায়
                 **chunk['metadata']
             }
         })
     
-    index.upsert(vectors=vectors)
+    # ব্যাচ আকারে আপলোড
+    for i in range(0, len(vectors), PINECONE_BATCH_SIZE):
+        batch = vectors[i:i+PINECONE_BATCH_SIZE]
+        index.upsert(vectors=batch)
+    
     return len(vectors)
 
 async def process_single_pdf(pdf_info, folder_name):
@@ -508,9 +548,13 @@ async def process_single_pdf(pdf_info, folder_name):
     update_file_progress(file_hash, start_page - 1, total_pages)
     
     total_vectors = 0
+    pages_with_text = 0
     
     for page_num in range(start_page, total_pages + 1):
         text = extract_text_from_page(doc, page_num)
+        
+        if text and text.strip():
+            pages_with_text += 1
         
         volume_number = 1
         match = re.search(r'[Vv]ol(?:ume)?\s*(\d+)', pdf_info['filename'])
@@ -525,10 +569,10 @@ async def process_single_pdf(pdf_info, folder_name):
         
         if page_num % 5 == 0 or page_num == total_pages:
             update_file_progress(file_hash, page_num, total_pages)
-            logger.info(f"   💾 Checkpoint: page {page_num}/{total_pages}")
+            logger.info(f"   💾 Checkpoint: page {page_num}/{total_pages} (vectors: {total_vectors})")
         
-        if page_num % 10 == 0:
-            logger.info(f"   📄 Page {page_num}/{total_pages}")
+        if page_num % 50 == 0:
+            logger.info(f"   📊 Progress: {page_num}/{total_pages} pages, {total_vectors} vectors so far")
             gc.collect()
     
     doc.close()
@@ -542,12 +586,13 @@ async def process_single_pdf(pdf_info, folder_name):
     }
     mark_file_as_uploaded(pdf_info['filename'], file_hash, total_pages, total_vectors, size_mb, volume_info)
     
-    logger.info(f"✅ Completed: {pdf_info['filename']} ({total_pages} pages, {total_vectors} vectors)")
+    logger.info(f"✅ Completed: {pdf_info['filename']} ({total_pages} pages, {pages_with_text} pages with text, {total_vectors} vectors)")
     
     return {
         'status': 'success',
         'pages': total_pages,
         'vectors': total_vectors,
+        'pages_with_text': pages_with_text,
         'size_mb': size_mb,
         'resumed_from': start_page
     }
@@ -558,11 +603,13 @@ async def main():
     logger.info("=" * 60)
     logger.info("🚀 Internet Archive PDF Processor - GitHub Actions Cron")
     logger.info(f"📁 Checkpoint dir: {CHECKPOINT_DIR}")
+    logger.info(f"🔧 OCR Language: {OCR_LANG_PRIMARY}")
+    logger.info(f"🔧 OCR DPI: {OCR_DPI}")
     logger.info("=" * 60)
     
     global ia_session, hf_api
     
-    # Internet Archive লগইন (S3 কী প্রাধান্য পাবে)
+    # Internet Archive লগইন
     init_ia_session()
     
     # HF Login
@@ -638,6 +685,7 @@ async def main():
     failed = 0
     skipped = 0
     resumed = 0
+    total_vectors_processed = 0
     
     for pdf in pending_pdfs:
         try:
@@ -645,6 +693,7 @@ async def main():
             
             if result['status'] == 'success':
                 processed += 1
+                total_vectors_processed += result.get('vectors', 0)
                 if result.get('resumed_from', 1) > 1:
                     resumed += 1
             elif result['status'] == 'skipped':
@@ -665,6 +714,7 @@ async def main():
     logger.info(f"✅ Processed: {processed} ({resumed} resumed from checkpoint)")
     logger.info(f"⏭️ Skipped: {skipped}")
     logger.info(f"❌ Failed: {failed}")
+    logger.info(f"📊 Total vectors uploaded: {total_vectors_processed}")
     logger.info(f"💾 Checkpoint entries: {len(load_page_checkpoint())}")
     logger.info(f"📁 HF tracking entries: {len(load_upload_history().get('files', {}))}")
     logger.info("=" * 60)
