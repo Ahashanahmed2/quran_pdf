@@ -1,8 +1,8 @@
-name: Process PDFs from Internet Archive
+name: Process PDF
 
 on:
   schedule:
-    #- cron: '* * * * *'
+  #- cron: '* * * * *'
   workflow_dispatch:
 
 jobs:
