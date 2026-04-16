@@ -57,8 +57,8 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 IA_ACCOUNT_ID = os.environ.get("IA_ACCOUNT_ID", "ahashan_ahmed185")
 
 # ✅ নতুন: ইমেইল ও পাসওয়ার্ড এনভায়রনমেন্ট ভেরিয়েবল
-IA_EMAIL = os.environ.get("IA_EMAIL", "")
-IA_PASSWORD = os.environ.get("IA_PASSWORD", "")
+IA_EMAIL = os.environ.get("IA_EMAIL")
+IA_PASSWORD = os.environ.get("IA_PASSWORD")
 
 # HF ট্র্যাকিং রেপো
 HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
