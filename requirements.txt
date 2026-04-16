@@ -3,9 +3,8 @@ pinecone
 sentence-transformers
 huggingface-hub
 httpx
-pytesseract
 Pillow
 PyMuPDF
 internetarchive
-opencv-python-headless
+easyocr
 numpy
