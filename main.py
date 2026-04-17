@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (সঠিক ইনিশিয়ালাইজেশন সহ)
+একক ফাইল: FastAPI + Telegram Bot (সরলীকৃত ও নির্ভরযোগ্য)
 """
 
 import os
@@ -241,14 +241,11 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
 async def process_telegram_updates():
-    """পেন্ডিং আপডেট প্রসেস করে"""
+    """পেন্ডিং আপডেট প্রসেস করে (সরলীকৃত)"""
     global application, bot
     if application and bot:
         try:
-            # bot ইনিশিয়ালাইজড কিনা নিশ্চিত করুন
-            if not bot._initialized:
-                await bot.initialize()
-            
+            # সরাসরি get_updates ব্যবহার করুন
             updates = await bot.get_updates(allowed_updates=Update.ALL_TYPES, timeout=1)
             for update in updates:
                 await application.process_update(update)
@@ -259,14 +256,12 @@ async def setup_bot():
     """বট সেটআপ করে - সম্পূর্ণ ইনিশিয়ালাইজেশন সহ"""
     global application, bot
     if TELEGRAM_BOT_TOKEN:
-        # Bot তৈরি
+        # Bot তৈরি ও ইনিশিয়ালাইজ
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        # Bot ইনিশিয়ালাইজ করুন
         await bot.initialize()
         
-        # Application তৈরি
+        # Application তৈরি ও ইনিশিয়ালাইজ
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        # Application ইনিশিয়ালাইজ করুন
         await application.initialize()
         
         # হ্যান্ডলার যোগ করুন
