@@ -241,17 +241,15 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
 async def process_telegram_updates():
-    """পেন্ডিং আপডেট প্রসেস করে (সরলীকৃত)"""
     global application, bot
     if application and bot:
         try:
-            # সরাসরি get_updates ব্যবহার করুন
+            # ✅ সরাসরি get_updates কল করুন
             updates = await bot.get_updates(allowed_updates=Update.ALL_TYPES, timeout=1)
             for update in updates:
                 await application.process_update(update)
         except Exception as e:
             print(f"Update processing error: {e}")
-
 async def setup_bot():
     """বট সেটআপ করে - সম্পূর্ণ ইনিশিয়ালাইজেশন সহ"""
     global application, bot
