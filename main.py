@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (আলাদা থ্রেডে বট)
+একক ফাইল: FastAPI + Telegram Bot (Webhook পদ্ধতি - সবচেয়ে নির্ভরযোগ্য)
 """
 
 import os
@@ -8,13 +8,10 @@ import io
 import re
 import json
 import time
-import asyncio
-import threading
 from pathlib import Path
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
 import fitz  # PyMuPDF
@@ -27,6 +24,7 @@ MEDIAFIRE_PASSWORD = os.environ.get("MEDIAFIRE_PASSWORD")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HF_DATASET = os.environ.get("HF_DATASET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-image.onrender.com")
 
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
@@ -34,7 +32,7 @@ CHECKPOINT_FILE = Path("/tmp/checkpoint.json")
 
 # ============ গ্লোবাল ভ্যারিয়েবল ============
 tg_application = None
-tg_thread = None
+bot = None
 # =============================================
 
 class ProcessRequest(BaseModel):
@@ -243,51 +241,63 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
-def run_telegram_bot():
-    """আলাদা থ্রেডে টেলিগ্রাম বট চালায়"""
-    global tg_application
+async def webhook_handler(request: Request):
+    """টেলিগ্রাম থেকে আসা ওয়েবহুক রিকোয়েস্ট হ্যান্ডল করে"""
+    if tg_application is None:
+        return {"status": "error", "message": "Bot not initialized"}
     
-    # নতুন ইভেন্ট লুপ তৈরি করুন
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    tg_application.add_handler(CommandHandler('start', tg_start))
-    tg_application.add_handler(CommandHandler('confirm', tg_confirm))
-    tg_application.add_handler(CommandHandler('cancel', tg_cancel))
-    tg_application.add_handler(CommandHandler('status', tg_status))
-    tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
-    
-    print("🤖 Telegram Bot starting...")
-    # ব্লকিং কল, এখানে থাকবে
-    tg_application.run_polling(allowed_updates=Update.ALL_TYPES)
+    data = await request.json()
+    update = Update.de_json(data, bot)
+    await tg_application.process_update(update)
+    return {"status": "ok"}
 
 # ============ FastAPI অ্যাপ ============
 app = FastAPI()
 
 @app.on_event("startup")
-def startup_event():
-    """FastAPI শুরু হলে টেলিগ্রাম বট চালু করুন"""
-    global tg_thread
+async def startup_event():
+    """FastAPI শুরু হলে টেলিগ্রাম বট সেটআপ করুন (Webhook)"""
+    global tg_application, bot
     if TELEGRAM_BOT_TOKEN:
-        tg_thread = threading.Thread(target=run_telegram_bot, daemon=True)
-        tg_thread.start()
-        print("🤖 Telegram Bot thread started.")
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # হ্যান্ডলার যোগ করুন
+        tg_application.add_handler(CommandHandler('start', tg_start))
+        tg_application.add_handler(CommandHandler('confirm', tg_confirm))
+        tg_application.add_handler(CommandHandler('cancel', tg_cancel))
+        tg_application.add_handler(CommandHandler('status', tg_status))
+        tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
+        
+        # ইনিশিয়ালাইজ করুন (শুধু হ্যান্ডলার সেটআপের জন্য)
+        await tg_application.initialize()
+        
+        # ওয়েবহুক সেট করুন
+        webhook_url = f"{RENDER_URL}/webhook"
+        await bot.set_webhook(webhook_url)
+        print(f"🤖 Webhook set to: {webhook_url}")
+        
+        print("🤖 Telegram Bot ready (Webhook mode).")
     else:
         print("⚠️ TELEGRAM_BOT_TOKEN not set. Bot not started.")
 
 @app.on_event("shutdown")
-def shutdown_event():
-    """শাটডাউনের সময় বট বন্ধ করুন"""
-    global tg_application
+async def shutdown_event():
+    """শাটডাউনের সময় ওয়েবহুক রিমুভ করুন"""
+    if bot:
+        await bot.delete_webhook()
+        print("🤖 Webhook removed.")
     if tg_application:
-        print("🤖 Shutting down Telegram Bot...")
-        # বট বন্ধ করার জন্য সিগন্যাল
-        tg_application.stop_running()
+        await tg_application.shutdown()
 
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    """টেলিগ্রাম ওয়েবহুক এন্ডপয়েন্ট"""
+    return await webhook_handler(request)
 
 @app.post("/start_processing")
 async def start_processing(request: ProcessRequest, background_tasks: BackgroundTasks):
