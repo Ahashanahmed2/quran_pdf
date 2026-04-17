@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (সরল পোলিং পদ্ধতি)
+একক ফাইল: FastAPI + Telegram Bot (সঠিক অ্যাসিন্ক পোলিং)
 """
 
 import os
@@ -8,6 +8,7 @@ import io
 import re
 import json
 import time
+import asyncio
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ CHECKPOINT_FILE = Path("/tmp/checkpoint.json")
 
 # গ্লোবাল ভেরিয়েবল
 application = None
+bot = None
 # =====================================
 
 class ProcessRequest(BaseModel):
@@ -172,7 +174,7 @@ def process_pdfs(folder_key: str, folder_name: str, chat_id: int):
     except Exception as e:
         send_telegram(chat_id, f"❌ *এরর:* `{str(e)[:200]}`")
 
-# ============ টেলিগ্রাম বট হ্যান্ডলার (সিঙ্ক্রোনাস) ============
+# ============ টেলিগ্রাম বট হ্যান্ডলার (অ্যাসিন্ক) ============
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 *MediaFire to HuggingFace Processor*\n\n"
@@ -239,10 +241,22 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
+async def process_telegram_updates():
+    """পেন্ডিং আপডেট প্রসেস করে"""
+    global application, bot
+    if application and bot:
+        try:
+            updates = await bot.get_updates(allowed_updates=Update.ALL_TYPES, timeout=1)
+            for update in updates:
+                await application.process_update(update)
+        except Exception as e:
+            print(f"Update processing error: {e}")
+
 def setup_bot():
     """বট সেটআপ করে (একবার)"""
-    global application
-    if application is None:
+    global application, bot
+    if application is None and TELEGRAM_BOT_TOKEN:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         application.add_handler(CommandHandler('start', tg_start))
         application.add_handler(CommandHandler('confirm', tg_confirm))
@@ -250,19 +264,6 @@ def setup_bot():
         application.add_handler(CommandHandler('status', tg_status))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
         print("🤖 Telegram Bot handlers set up.")
-
-def process_telegram_updates():
-    """সকল পেন্ডিং আপডেট প্রসেস করে (প্রতি রিকোয়েস্টে কল হবে)"""
-    global application
-    if application:
-        try:
-            # সিঙ্ক্রোনাস আপডেট প্রসেসিং
-            bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            updates = bot.get_updates(allowed_updates=Update.ALL_TYPES, timeout=1)
-            for update in updates:
-                application.process_update(update)
-        except Exception as e:
-            print(f"Update processing error: {e}")
 
 # ============ FastAPI অ্যাপ ============
 app = FastAPI()
@@ -277,9 +278,9 @@ def startup_event():
         print("⚠️ TELEGRAM_BOT_TOKEN not set.")
 
 @app.get("/")
-def root():
+async def root():
     # প্রতি রিকোয়েস্টে পেন্ডিং আপডেট চেক করুন
-    process_telegram_updates()
+    await process_telegram_updates()
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
 
 @app.post("/start_processing")
