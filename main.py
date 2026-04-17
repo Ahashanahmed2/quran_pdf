@@ -1,721 +1,353 @@
 #!/usr/bin/env python3
 """
-Internet Archive PDF Processor - GitHub Actions Cron Job
-হায়ারার্কি: অ্যাকাউন্ট → ফোল্ডার → আইটেম → PDF
+একক ফাইল: FastAPI + Telegram Bot
+MediaFire থেকে PDF নিয়ে Hugging Face-এ ইমেজ আপলোড করে
 """
 
 import os
-import asyncio
 import io
 import re
 import json
-import hashlib
-import gc
-import uuid
-import httpx
-from datetime import datetime
+import time
+import asyncio
+import threading
 from pathlib import Path
-from pypdf import PdfReader
-from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
-from huggingface_hub import HfApi, login, hf_hub_download
-import logging
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import requests
+import fitz  # PyMuPDF
+from mediafire import MediaFireApi
+from huggingface_hub import HfApi, upload_file
 
-# ✅ Internet Archive লাইব্রেরি (S3 কী এর জন্য)
-try:
-    from internetarchive import configure, get_session
-    IA_LIB_AVAILABLE = True
-except ImportError:
-    IA_LIB_AVAILABLE = False
-    print("⚠️ internetarchive library not available. Install: pip install internetarchive")
+# ============ কনফিগারেশন ============
+app = FastAPI()
 
-# ✅ EasyOCR লাইব্রেরি (বাংলা/আরবির জন্য)
-try:
-    import easyocr
-    import numpy as np
-    from PIL import Image
-    import fitz  # PyMuPDF
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-    print("⚠️ OCR libraries not available")
+# এনভায়রনমেন্ট ভেরিয়েবল
+MEDIAFIRE_EMAIL = os.environ.get("MEDIAFIRE_EMAIL")
+MEDIAFIRE_PASSWORD = os.environ.get("MEDIAFIRE_PASSWORD")
+HF_TOKEN = os.environ.get("HF_TOKEN")
+HF_DATASET = os.environ.get("HF_DATASET")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# --- লগিং সেটআপ ---
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('/tmp/processor.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# টেম্প ফোল্ডার
+TEMP_DIR = Path("/tmp/tafsir_temp")
+TEMP_DIR.mkdir(exist_ok=True)
+CHECKPOINT_FILE = Path("/tmp/checkpoint.json")
+# ====================================
 
-# --- কনফিগারেশন ---
-PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "")
-if not PINECONE_API_KEY:
-    PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
+# ============ Pydantic মডেল ============
+class ProcessRequest(BaseModel):
+    folder_key: str
+    folder_name: str
+    telegram_chat_id: int
 
-PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "quranqpf")
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-IA_ACCOUNT_ID = os.environ.get("IA_ACCOUNT_ID", "ahashan_ahmed185")
-
-# S3 কী (সবচেয়ে নির্ভরযোগ্য)
-IA_S3_ACCESS = os.environ.get("IA_S3_ACCESS", "")
-IA_S3_SECRET = os.environ.get("IA_S3_SECRET", "")
-
-# ব্যাকআপ: ইমেইল/পাসওয়ার্ড (S3 না থাকলে)
-IA_EMAIL = os.environ.get("IA_EMAIL", "")
-IA_PASSWORD = os.environ.get("IA_PASSWORD", "")
-
-HF_TRACKING_REPO = "ahashanahmed/quran-bot-tracking"
-
-# ✅ চেকপয়েন্ট ফাইল
-CHECKPOINT_DIR = Path("/tmp/checkpoints")
-CHECKPOINT_DIR.mkdir(exist_ok=True)
-PAGE_CHECKPOINT_FILE = CHECKPOINT_DIR / "page_checkpoint.json"
-
-# ✅ ব্যাচ সাইজ
-PINECONE_BATCH_SIZE = 10
-
-# ✅ গ্লোবাল ভেরিয়েবল
-index = None
-embedding_model = None
-hf_api = None
-pc = None
-ia_session = None
-ocr_reader = None  # EasyOCR রিডার
-
-# --- চেকপয়েন্ট সিস্টেম ---
-def load_page_checkpoint():
-    """পৃষ্ঠা চেকপয়েন্ট লোড"""
-    try:
-        if PAGE_CHECKPOINT_FILE.exists():
-            with open(PAGE_CHECKPOINT_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_page_checkpoint(checkpoint):
-    """পৃষ্ঠা চেকপয়েন্ট সংরক্ষণ"""
-    try:
-        with open(PAGE_CHECKPOINT_FILE, 'w') as f:
-            json.dump(checkpoint, f, indent=2)
-    except:
-        pass
-
-def get_file_progress(file_hash):
-    """নির্দিষ্ট ফাইলের অগ্রগতি"""
-    checkpoint = load_page_checkpoint()
-    return checkpoint.get(file_hash, {'last_page': 0, 'completed': False, 'total_pages': 0})
-
-def update_file_progress(file_hash, page_num, total_pages=None, completed=False):
-    """ফাইলের অগ্রগতি আপডেট"""
-    checkpoint = load_page_checkpoint()
-    existing = checkpoint.get(file_hash, {})
-
-    checkpoint[file_hash] = {
-        'last_page': page_num,
-        'completed': completed,
-        'total_pages': total_pages or existing.get('total_pages', 0),
-        'updated_at': datetime.now().isoformat()
-    }
-    save_page_checkpoint(checkpoint)
-    logger.info(f"   💾 Checkpoint saved: page {page_num}")
-
-def is_file_completed(file_hash):
-    """ফাইল সম্পূর্ণ প্রক্রিয়াকৃত কিনা"""
-    progress = get_file_progress(file_hash)
-    return progress.get('completed', False)
-
-# --- EasyOCR ইনিশিয়ালাইজেশন ---
-def get_ocr_reader():
-    """EasyOCR রিডার তৈরি বা রিটার্ন করে"""
-    global ocr_reader
-    if ocr_reader is None and OCR_AVAILABLE:
+# ============ টেলিগ্রাম ফাংশন ============
+def send_telegram(chat_id, message):
+    """টেলিগ্রামে মেসেজ পাঠায়"""
+    if TELEGRAM_BOT_TOKEN:
         try:
-            logger.info("🔧 Initializing EasyOCR reader for Bengali, Arabic, and English...")
-            # বাংলা, আরবি, ইংরেজি ভাষা সাপোর্ট
-            ocr_reader = easyocr.Reader(['bn', 'ar', 'en'], gpu=False, verbose=False)
-            logger.info("✅ EasyOCR reader initialized successfully.")
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {"chat_id": chat_id, "text": message[:4000], "parse_mode": "Markdown"}
+            requests.post(url, data=data, timeout=10)
         except Exception as e:
-            logger.error(f"❌ EasyOCR initialization failed: {e}")
-            return None
-    return ocr_reader
+            print(f"Telegram error: {e}")
 
-# --- Internet Archive লগইন ---
-def init_ia_session():
-    global ia_session
+def extract_from_mediafire_url(url):
+    """MediaFire URL থেকে ফোল্ডার কী ও নাম বের করে"""
+    key_match = re.search(r'/folder/([a-zA-Z0-9]+)', url)
+    if not key_match:
+        return None, None
     
-    if not IA_LIB_AVAILABLE:
-        logger.warning("⚠️ internetarchive library not installed. Only public items will be accessible.")
-        return None
+    folder_key = key_match.group(1)
     
-    # পদ্ধতি ১: S3 কী (সবচেয়ে নির্ভরযোগ্য)
-    if IA_S3_ACCESS and IA_S3_SECRET:
-        try:
-            logger.info("🔐 Logging into Internet Archive using S3 keys...")
-            configure(access_key=IA_S3_ACCESS, secret_key=IA_S3_SECRET)
-            ia_session = get_session()
-            logger.info("✅ Internet Archive login successful (S3 keys)")
-            return ia_session
-        except Exception as e:
-            logger.error(f"❌ S3 login failed: {e}")
+    name_match = re.search(r'/folder/[a-zA-Z0-9]+/(.+?)$', url)
+    if name_match:
+        folder_name = name_match.group(1).replace('+', ' ').replace('%20', ' ')
+    else:
+        folder_name = folder_key
     
-    # পদ্ধতি ২: ইমেইল/পাসওয়ার্ড (ব্যাকআপ)
-    if IA_EMAIL and IA_PASSWORD:
-        try:
-            logger.info(f"🔐 Logging into Internet Archive using email...")
-            configure(IA_EMAIL, IA_PASSWORD)
-            ia_session = get_session()
-            logger.info("✅ Internet Archive login successful (email/password)")
-            return ia_session
-        except Exception as e:
-            logger.error(f"❌ Email login failed: {e}")
+    return folder_key, folder_name
+
+# ============ PDF প্রসেসিং ফাংশন ============
+def load_checkpoint():
+    if CHECKPOINT_FILE.exists():
+        with open(CHECKPOINT_FILE, 'r') as f:
+            return json.load(f)
+    return {"processed": [], "current": None, "last_page": 0}
+
+def save_checkpoint(checkpoint):
+    with open(CHECKPOINT_FILE, 'w') as f:
+        json.dump(checkpoint, f, indent=2)
+
+def get_mediafire_files(folder_key):
+    """MediaFire থেকে সব PDF-এর লিংক বের করে"""
+    api = MediaFireApi()
+    session = api.user_get_session_token(
+        email=MEDIAFIRE_EMAIL, 
+        password=MEDIAFIRE_PASSWORD, 
+        app_id='42511'
+    )
+    api.session = session
     
-    logger.warning("⚠️ No valid credentials found. Only public items will be accessible.")
-    return None
-
-# --- Pinecone Initialization ---
-def init_pinecone():
-    global pc, index, embedding_model
-
-    logger.info("🔌 Connecting to Pinecone...")
-    pc = Pinecone(api_key=PINECONE_API_KEY)
-
-    if PINECONE_INDEX_NAME not in [idx.name for idx in pc.list_indexes()]:
-        pc.create_index(
-            name=PINECONE_INDEX_NAME,
-            dimension=384,
-            metric="cosine",
-            spec={"serverless": {"cloud": "aws", "region": "us-east-1"}}
-        )
-        logger.info(f"✅ Created new Pinecone index: {PINECONE_INDEX_NAME}")
-
-    index = pc.Index(PINECONE_INDEX_NAME)
-    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    logger.info("✅ Pinecone ready")
-
-# --- HF Tracking ---
-def load_upload_history():
-    """HF থেকে আপলোড ইতিহাস লোড"""
-    try:
-        if hf_api:
-            file_path = hf_hub_download(
-                repo_id=HF_TRACKING_REPO,
-                filename="uploaded_files.json",
-                repo_type="dataset",
-                token=HF_TOKEN
-            )
-            with open(file_path, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.warning(f"HF থেকে লোড করা যায়নি: {e}")
-
-    return {"files": {}, "total_uploads": 0}
-
-def save_upload_history(history):
-    """HF-এ আপলোড ইতিহাস সংরক্ষণ"""
-    try:
-        if hf_api:
-            temp_path = "/tmp/uploaded_files.json"
-            with open(temp_path, 'w') as f:
-                json.dump(history, f, indent=2)
-
-            hf_api.upload_file(
-                path_or_fileobj=temp_path,
-                path_in_repo="uploaded_files.json",
-                repo_id=HF_TRACKING_REPO,
-                repo_type="dataset",
-                commit_message=f"Update - {datetime.now().isoformat()}"
-            )
-            logger.info("✅ Tracking uploaded to HF")
-            return True
-    except Exception as e:
-        logger.error(f"HF upload failed: {e}")
-    return False
-
-def check_file_already_uploaded(file_hash):
-    """ফাইল আগে HF-এ আপলোড হয়েছে কিনা"""
-    history = load_upload_history()
-    return file_hash in history.get('files', {})
-
-def mark_file_as_uploaded(filename, file_hash, pages, vectors, size_mb, volume_info=None):
-    """ফাইল HF-এ আপলোড হিসেবে মার্ক"""
-    history = load_upload_history()
-    history['files'][file_hash] = {
-        'filename': filename,
-        'hash': file_hash,
-        'uploaded_at': datetime.now().isoformat(),
-        'pages': pages,
-        'vectors': vectors,
-        'size_mb': size_mb,
-        'volume_info': volume_info or {}
-    }
-    history['total_uploads'] = len(history['files'])
-    save_upload_history(history)
-
-# --- Hash Functions ---
-def get_file_hash(pdf_bytes):
-    """PDF-এর ইউনিক হ্যাশ"""
-    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    file_size = len(pdf_bytes)
-
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        page_count = len(reader.pages)
-        return f"{content_hash[:8]}_{file_size}_{page_count}"
-    except:
-        return f"{content_hash[:8]}_{file_size}"
-
-# --- Internet Archive Functions ---
-async def get_account_folders(account_id):
-    """অ্যাকাউন্ট → ফোল্ডার (আইটেম) লিস্ট"""
-    all_items = []
+    folder_content = api.folder_get_content(folder_key=folder_key)
     
-    if ia_session:
-        try:
-            logger.info(f"🔍 Searching with login for uploader:{account_id}")
+    files = []
+    for item in folder_content['folder_content']:
+        if item['type'] == 'file' and item['filename'].endswith('.pdf'):
+            file_links = api.file_get_links(quickkey=item['quickkey'])
+            download_link = None
+            for link in file_links['links']:
+                if link['type'] == 'normal_download':
+                    download_link = link['normal_download']
+                    break
             
-            def search_items():
-                search_result = ia_session.search_items(f'uploader:{account_id}')
-                return list(search_result)
+            try:
+                num = int(item['filename'].replace('.pdf', ''))
+            except:
+                num = 999
             
-            items = await asyncio.to_thread(search_items)
-            
-            for item in items:
-                all_items.append({
-                    'identifier': item['identifier'],
-                    'title': item.get('title', item['identifier']),
-                    'date': item.get('date', '')
-                })
-            
-            logger.info(f"📁 Found {len(all_items)} items (including private) using login")
-            
-            if len(all_items) == 0:
-                logger.info("🔄 No items found via search, trying direct item access...")
-                # আপনার আইটেম আইডি যোগ করুন
-                test_items = ["4_20260415_20260415_1019"]
-                for test_item in test_items:
-                    try:
-                        item_metadata = await get_item_metadata(test_item)
-                        if item_metadata:
-                            all_items.append({
-                                'identifier': test_item,
-                                'title': item_metadata.get('title', test_item),
-                                'date': item_metadata.get('date', '')
-                            })
-                            logger.info(f"✅ Found item via direct access: {test_item}")
-                    except Exception as e:
-                        logger.warning(f"Direct access failed for {test_item}: {e}")
-            
-            return all_items
-            
-        except Exception as e:
-            logger.warning(f"Login-based search failed: {e}, falling back to public API")
+            files.append({
+                'name': item['filename'],
+                'number': num,
+                'download_link': download_link,
+            })
     
-    logger.info("📁 Using public API (only public items)")
-    page = 1
-    folders = []
+    files.sort(key=lambda x: x['number'])
+    return files
+
+def pdf_to_images(pdf_bytes, dpi=300):
+    """PDF থেকে PNG ইমেজ তৈরি করে"""
+    images = []
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = len(pdf_document)
     
-    while True:
-        url = f"https://archive.org/advancedsearch.php?q=uploader:{account_id}&output=json&rows=100&page={page}"
+    for page_num in range(total_pages):
+        page = pdf_document.load_page(page_num)
+        zoom = dpi / 72
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img_bytes = pix.tobytes("png")
         
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            if response.status_code != 200:
-                break
-            
-            data = response.json()
-            items = data.get('response', {}).get('docs', [])
-            
-            if not items:
-                break
-            
-            for item in items:
-                folders.append({
-                    'identifier': item.get('identifier'),
-                    'title': item.get('title', item.get('identifier')),
-                    'date': item.get('date', '')
-                })
-            
-            total = data.get('response', {}).get('numFound', 0)
-            if len(folders) >= total:
-                break
-            
-            page += 1
-            await asyncio.sleep(0.5)
-    
-    return folders
+        images.append({
+            'page_num': page_num + 1,
+            'bytes': img_bytes,
+            'name': f"page_{page_num+1:04d}.png",
+        })
+        del pix
+        
+    pdf_document.close()
+    return images, total_pages
 
-async def get_item_metadata(item_id):
-    """একটি নির্দিষ্ট আইটেমের মেটাডেটা আনে"""
-    metadata_url = f"https://archive.org/metadata/{item_id}"
-    async with httpx.AsyncClient() as client:
-        response = await client.get(metadata_url)
+def upload_to_hf(folder_path, image):
+    """ইমেজ Hugging Face-এ আপলোড করে"""
+    path_in_repo = f"{folder_path}/{image['name']}"
+    upload_file(
+        path_or_fileobj=io.BytesIO(image['bytes']),
+        path_in_repo=path_in_repo,
+        repo_id=HF_DATASET,
+        repo_type="dataset",
+        token=HF_TOKEN
+    )
+    return True
+
+def download_pdf(url):
+    """PDF ডাউনলোড করে"""
+    response = requests.get(url, stream=True, timeout=180)
+    response.raise_for_status()
+    return response.content
+
+def process_pdfs(folder_key: str, folder_name: str, chat_id: int):
+    """ব্যাকগ্রাউন্ডে PDF প্রসেস করে"""
+    clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
+    
+    send_telegram(chat_id, f"🚀 *প্রসেসিং শুরু হয়েছে!*\n\n📁 ফোল্ডার: `{clean_folder_name}`\n🔑 কী: `{folder_key}`")
+    
+    try:
+        pdf_files = get_mediafire_files(folder_key)
+        send_telegram(chat_id, f"📚 {len(pdf_files)}টি PDF পাওয়া গেছে।")
+        
+        if not pdf_files:
+            send_telegram(chat_id, "❌ কোনো PDF পাওয়া যায়নি!")
+            return
+        
+        checkpoint = load_checkpoint()
+        processed = set(checkpoint.get('processed', []))
+        
+        for pdf in pdf_files:
+            if pdf['name'] in processed:
+                send_telegram(chat_id, f"⏭️ স্কিপ: {pdf['name']} (ইতিমধ্যে প্রসেস হয়েছে)")
+                continue
+            
+            sub_folder = str(pdf['number'])
+            full_hf_path = f"{clean_folder_name}/{sub_folder}"
+            
+            send_telegram(chat_id, f"📄 *প্রসেসিং: {pdf['name']}*\n📁 লোকেশন: `{full_hf_path}`")
+            
+            pdf_bytes = download_pdf(pdf['download_link'])
+            images, total_pages = pdf_to_images(pdf_bytes, dpi=300)
+            send_telegram(chat_id, f"🖼️ {total_pages} পৃষ্ঠা কনভার্ট হয়েছে। আপলোড শুরু...")
+            
+            for i, img in enumerate(images):
+                upload_to_hf(full_hf_path, img)
+                
+                if (i + 1) % 10 == 0:
+                    send_telegram(chat_id, f"📊 {sub_folder}: {i+1}/{total_pages} পৃষ্ঠা আপলোড হয়েছে")
+                
+                time.sleep(0.3)
+            
+            processed.add(pdf['name'])
+            checkpoint['processed'] = list(processed)
+            save_checkpoint(checkpoint)
+            
+            send_telegram(chat_id, f"✅ *সম্পন্ন: {pdf['name']}*\n📄 {total_pages} পৃষ্ঠা, 🖼️ 300 DPI কোয়ালিটি")
+        
+        send_telegram(chat_id, f"🎉 *সব প্রসেস সম্পন্ন!*\n\n📁 ডেটাসেট: `{HF_DATASET}/{clean_folder_name}`")
+        
+    except Exception as e:
+        send_telegram(chat_id, f"❌ *এরর:* `{str(e)[:200]}`")
+
+# ============ FastAPI এন্ডপয়েন্ট ============
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Tafsir Image Processor is running"}
+
+@app.post("/start_processing")
+async def start_processing(request: ProcessRequest, background_tasks: BackgroundTasks):
+    """প্রসেসিং শুরু করার এন্ডপয়েন্ট"""
+    if not request.folder_key or not request.folder_name:
+        raise HTTPException(status_code=400, detail="folder_key and folder_name required")
+    
+    background_tasks.add_task(
+        process_pdfs, 
+        request.folder_key, 
+        request.folder_name, 
+        request.telegram_chat_id
+    )
+    
+    return {"status": "started", "message": "Processing started in background"}
+
+@app.get("/status")
+def get_status():
+    """বর্তমান অবস্থা দেখায়"""
+    checkpoint = load_checkpoint()
+    return {
+        "processed": len(checkpoint.get('processed', [])),
+        "current": checkpoint.get('current'),
+        "last_page": checkpoint.get('last_page', 0)
+    }
+
+# ============ টেলিগ্রাম বট হ্যান্ডলার ============
+async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🚀 *MediaFire to HuggingFace Processor*\n\n"
+        "আমাকে একটি MediaFire ফোল্ডার লিংক দিন।\n"
+        "আমি নিজেই সব ফোল্ডার ও ফাইল খুঁজে বের করে\n"
+        "Hugging Face-এ ইমেজ আপলোড করব।\n\n"
+        "📎 উদাহরণ:\n"
+        "`https://www.mediafire.com/folder/ise60co8v4h6b/তাফসীর+ফী+যিলালিল+কোরআন`\n\n"
+        "লিংক পাঠান এখন!",
+        parse_mode="Markdown"
+    )
+
+async def tg_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    
+    folder_key, folder_name = extract_from_mediafire_url(url)
+    
+    if not folder_key:
+        await update.message.reply_text("❌ ভুল লিংক! সঠিক MediaFire ফোল্ডার লিংক দিন।")
+        return
+    
+    await update.message.reply_text(
+        f"📁 *ফোল্ডারের তথ্য:*\n\n"
+        f"🔑 কী: `{folder_key}`\n"
+        f"📂 নাম: `{folder_name}`\n\n"
+        f"✅ প্রসেসিং শুরু করতে /confirm",
+        parse_mode="Markdown"
+    )
+    
+    context.user_data['folder_key'] = folder_key
+    context.user_data['folder_name'] = folder_name
+
+async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    folder_key = context.user_data.get('folder_key')
+    folder_name = context.user_data.get('folder_name')
+    
+    if not folder_key:
+        await update.message.reply_text("❌ আগে একটি MediaFire লিংক দিন।")
+        return
+    
+    await update.message.reply_text(
+        f"🚀 *প্রসেসিং শুরু হচ্ছে...*\n\n"
+        f"📂 ফোল্ডার: `{folder_name}`\n\n"
+        f"আমি অগ্রগতি জানিয়ে থাকব।",
+        parse_mode="Markdown"
+    )
+    
+    # নিজের API-তে রিকোয়েস্ট (একই সার্ভার)
+    try:
+        response = requests.post(
+            f"http://localhost:{os.environ.get('PORT', 8000)}/start_processing",
+            json={
+                "folder_key": folder_key,
+                "folder_name": folder_name,
+                "telegram_chat_id": update.effective_chat.id
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!\nসমাপ্ত হলে আমি জানিয়ে দেব।")
+        else:
+            await update.message.reply_text(f"⚠️ সার্ভার এরর: {response.status_code}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ সংযোগ এরর: {e}")
+
+async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ বাতিল করা হয়েছে।")
+
+async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        response = requests.get(f"http://localhost:{os.environ.get('PORT', 8000)}/status", timeout=10)
         if response.status_code == 200:
             data = response.json()
-            return data.get('metadata', {})
-    return None
-
-async def get_pdfs_from_folder(folder_identifier):
-    """ফোল্ডার → আইটেম → PDF"""
-    metadata_url = f"https://archive.org/metadata/{folder_identifier}"
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(metadata_url)
-        if response.status_code != 200:
-            logger.error(f"Failed to fetch metadata for {folder_identifier}")
-            return []
-        
-        data = response.json()
-        folder_title = data.get('metadata', {}).get('title', folder_identifier)
-        files = data.get('files', [])
-        
-        pdf_files = []
-        for f in files:
-            if f.get('name', '').endswith('.pdf'):
-                pdf_files.append({
-                    'filename': f['name'],
-                    'url': f"https://archive.org/download/{folder_identifier}/{f['name']}",
-                    'size': f.get('size', 0),
-                    'folder_identifier': folder_identifier,
-                    'folder_title': folder_title
-                })
-        
-        return pdf_files
-
-async def download_pdf(url):
-    """PDF ডাউনলোড - লগইন সেশন সহ"""
-    if ia_session:
-        try:
-            def download_with_session():
-                response = ia_session.get(url, allow_redirects=True)
-                if response.status_code == 200:
-                    return response.content
-                else:
-                    raise Exception(f"HTTP {response.status_code}")
-            
-            content = await asyncio.to_thread(download_with_session)
-            return content
-        except Exception as e:
-            logger.warning(f"Session download failed: {e}, trying without session...")
-    
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        response = await client.get(url)
-        if response.status_code != 200:
-            raise Exception(f"Download failed: {response.status_code}")
-        return response.content
-
-# --- PDF Processing (EasyOCR সহ) ---
-def extract_text_from_page(doc, page_num):
-    """একটি পৃষ্ঠা থেকে টেক্সট এক্সট্র্যাক্ট - EasyOCR ব্যবহার করে"""
-    page = doc.load_page(page_num - 1)
-    text = page.get_text("text")
-    
-    # যদি সরাসরি টেক্সট না পাওয়া যায়, তাহলে EasyOCR চেষ্টা করবে
-    if not text or not text.strip():
-        logger.info(f"   📄 Page {page_num}: No direct text, trying EasyOCR...")
-        if OCR_AVAILABLE:
-            try:
-                # পৃষ্ঠাটি ইমেজে রূপান্তর (200 DPI যথেষ্ট)
-                zoom = 200 / 72
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                img_np = np.array(img)
-                
-                # EasyOCR রিডার পেয়ে টেক্সট বের করা
-                reader = get_ocr_reader()
-                if reader:
-                    result = reader.readtext(img_np, detail=0, paragraph=True)
-                    text = "\n".join(result)
-                    logger.info(f"   ✅ Page {page_num}: EasyOCR complete, text length: {len(text)}")
-                    if len(text) < 30:
-                        logger.warning(f"   ⚠️ Page {page_num}: EasyOCR got very little text")
-                else:
-                    logger.warning(f"   ⚠️ Page {page_num}: EasyOCR reader not available")
-                
-                img.close()
-                del pix
-                
-            except Exception as e:
-                logger.warning(f"   ⚠️ Page {page_num}: EasyOCR failed - {e}")
-                text = ""
+            await update.message.reply_text(
+                f"📊 *বর্তমান অবস্থা:*\n\n"
+                f"✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF\n"
+                f"🔄 চলমান: {data.get('current', 'কিছু না')}\n"
+                f"📄 শেষ পৃষ্ঠা: {data.get('last_page', 0)}",
+                parse_mode="Markdown"
+            )
         else:
-            logger.warning(f"   ⚠️ Page {page_num}: OCR not available")
-    
-    del page
-    return text
+            await update.message.reply_text("⚠️ সার্ভার থেকে রেসপন্স পাওয়া যায়নি।")
+    except Exception as e:
+        await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
-def create_chunks(text, filename, page_num, book_name, volume_number=1):
-    """টেক্সট থেকে চাঙ্ক তৈরি"""
-    chunks = []
+def run_telegram_bot():
+    """টেলিগ্রাম বট আলাদা থ্রেডে চালায়"""
+    tg_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    if not text or not text.strip():
-        return chunks
+    tg_app.add_handler(CommandHandler('start', tg_start))
+    tg_app.add_handler(CommandHandler('confirm', tg_confirm))
+    tg_app.add_handler(CommandHandler('cancel', tg_cancel))
+    tg_app.add_handler(CommandHandler('status', tg_status))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
     
-    # প্যারাগ্রাফ স্প্লিট
-    paras = re.split(r'\n\s*\n', text)
-    
-    for j, para in enumerate(paras):
-        para = para.strip()
-        # মিনিমাম চাঙ্ক সাইজ ৩০ অক্ষর (বাংলার জন্য)
-        if len(para) < 30:
-            continue
-        
-        chunks.append({
-            'text': para,
-            'metadata': {
-                'type': 'paragraph',
-                'page': page_num,
-                'para_number': j + 1,
-                'filename': filename,
-                'book': book_name,
-                'volume': volume_number
-            }
-        })
-    
-    return chunks
+    print("🤖 Telegram Bot is running...")
+    tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-def save_to_pinecone(chunks, filename, page_num):
-    """Pinecone-এ চাঙ্ক সংরক্ষণ"""
-    global index, embedding_model
-    
-    if not chunks:
-        return 0
-    
-    texts = [c['text'] for c in chunks]
-    embeddings = embedding_model.encode(texts, batch_size=16, show_progress_bar=False)
-    embeddings = embeddings.tolist()
-    
-    vectors = []
-    file_hash = hashlib.sha256(filename.encode()).hexdigest()[:8]
-    
-    for j, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-        unique_id = f"{file_hash}_{page_num}_{j}_{uuid.uuid4().hex[:4]}"
-        
-        vectors.append({
-            'id': unique_id,
-            'values': emb,
-            'metadata': {
-                'text': chunk['text'][:500],  # প্রথম ৫০০ অক্ষর মেটাডেটায়
-                **chunk['metadata']
-            }
-        })
-    
-    # ব্যাচ আকারে আপলোড
-    for i in range(0, len(vectors), PINECONE_BATCH_SIZE):
-        batch = vectors[i:i+PINECONE_BATCH_SIZE]
-        index.upsert(vectors=batch)
-    
-    return len(vectors)
-
-async def process_single_pdf(pdf_info, folder_name):
-    """একটি PDF প্রক্রিয়াকরণ"""
-    logger.info(f"📄 Processing: {pdf_info['filename']} (from {folder_name})")
-    
-    pdf_bytes = await download_pdf(pdf_info['url'])
-    file_hash = get_file_hash(pdf_bytes)
-    
-    if check_file_already_uploaded(file_hash):
-        logger.info(f"⏭️ Already fully uploaded: {pdf_info['filename']}")
-        return {'status': 'skipped', 'reason': 'already_uploaded'}
-    
-    if is_file_completed(file_hash):
-        logger.info(f"⏭️ Already completed (checkpoint): {pdf_info['filename']}")
-        return {'status': 'skipped', 'reason': 'checkpoint_completed'}
-    
-    progress = get_file_progress(file_hash)
-    start_page = progress.get('last_page', 0) + 1
-    
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    total_pages = len(doc)
-    
-    if start_page > total_pages:
-        logger.warning(f"Checkpoint page {start_page} exceeds total {total_pages}, restarting from 1")
-        start_page = 1
-    
-    if start_page > 1:
-        logger.info(f"📌 Resuming from page {start_page}/{total_pages}")
-    
-    update_file_progress(file_hash, start_page - 1, total_pages)
-    
-    total_vectors = 0
-    pages_with_text = 0
-    
-    for page_num in range(start_page, total_pages + 1):
-        text = extract_text_from_page(doc, page_num)
-        
-        if text and text.strip():
-            pages_with_text += 1
-        
-        volume_number = 1
-        match = re.search(r'[Vv]ol(?:ume)?\s*(\d+)', pdf_info['filename'])
-        if match:
-            volume_number = int(match.group(1))
-        
-        chunks = create_chunks(text, pdf_info['filename'], page_num, folder_name, volume_number)
-        
-        if chunks:
-            uploaded = save_to_pinecone(chunks, pdf_info['filename'], page_num)
-            total_vectors += uploaded
-        
-        if page_num % 5 == 0 or page_num == total_pages:
-            update_file_progress(file_hash, page_num, total_pages)
-            logger.info(f"   💾 Checkpoint: page {page_num}/{total_pages} (vectors: {total_vectors})")
-        
-        if page_num % 50 == 0:
-            logger.info(f"   📊 Progress: {page_num}/{total_pages} pages, {total_vectors} vectors so far")
-            gc.collect()
-    
-    doc.close()
-    
-    update_file_progress(file_hash, total_pages, total_pages, completed=True)
-    
-    size_mb = len(pdf_bytes) / (1024 * 1024)
-    volume_info = {
-        'folder_name': folder_name,
-        'filename': pdf_info['filename']
-    }
-    mark_file_as_uploaded(pdf_info['filename'], file_hash, total_pages, total_vectors, size_mb, volume_info)
-    
-    logger.info(f"✅ Completed: {pdf_info['filename']} ({total_pages} pages, {pages_with_text} pages with text, {total_vectors} vectors)")
-    
-    return {
-        'status': 'success',
-        'pages': total_pages,
-        'vectors': total_vectors,
-        'pages_with_text': pages_with_text,
-        'size_mb': size_mb,
-        'resumed_from': start_page
-    }
-
-# --- মেইন ফাংশন ---
-async def main():
-    """মেইন প্রক্রিয়া: অ্যাকাউন্ট → ফোল্ডার → PDF"""
-    logger.info("=" * 60)
-    logger.info("🚀 Internet Archive PDF Processor - GitHub Actions Cron")
-    logger.info(f"📁 Checkpoint dir: {CHECKPOINT_DIR}")
-    logger.info(f"🔧 OCR Engine: EasyOCR (Bengali/Arabic/English)")
-    logger.info("=" * 60)
-    
-    global ia_session, hf_api
-    
-    # Internet Archive লগইন
-    init_ia_session()
-    
-    # EasyOCR প্রি-লোড (যাতে পরে সময় না লাগে)
-    if OCR_AVAILABLE:
-        get_ocr_reader()
-    
-    # HF Login
-    if HF_TOKEN:
-        login(token=HF_TOKEN)
-        hf_api = HfApi(token=HF_TOKEN)
-        logger.info("✅ Hugging Face logged in")
-    
-    # Pinecone Init
-    init_pinecone()
-    
-    # ধাপ ১: অ্যাকাউন্ট থেকে সব ফোল্ডার
-    logger.info(f"🔍 Scanning IA account: {IA_ACCOUNT_ID}")
-    folders = await get_account_folders(IA_ACCOUNT_ID)
-    logger.info(f"📁 Found {len(folders)} folders/items")
-    
-    if not folders:
-        logger.error("❌ No folders found! Check your IA_ACCOUNT_ID and credentials.")
-        logger.info("💡 Make sure your IA_ACCOUNT_ID is correct and items are either public or you have set IA_EMAIL/IA_PASSWORD for private items.")
-        return
-    
-    # ধাপ ২: প্রতিটি ফোল্ডার থেকে PDF
-    all_pdfs = []
-    
-    for folder in folders:
-        folder_id = folder['identifier']
-        folder_title = folder['title']
-        
-        logger.info(f"📂 Processing folder: {folder_title} ({folder_id})")
-        
-        pdfs = await get_pdfs_from_folder(folder_id)
-        
-        for pdf in pdfs:
-            pdf['folder_title'] = folder_title
-            all_pdfs.append(pdf)
-        
-        logger.info(f"   📄 Found {len(pdfs)} PDFs in this folder")
-    
-    logger.info(f"📊 Total PDFs found: {len(all_pdfs)}")
-    
-    # চেকপয়েন্ট ও HF হিস্টরি
-    checkpoint = load_page_checkpoint()
-    logger.info(f"💾 Checkpoint has {len(checkpoint)} entries")
-    
-    history = load_upload_history()
-    logger.info(f"📋 HF history has {len(history.get('files', {}))} entries")
-    
-    # নতুন PDF ফিল্টার
-    pending_pdfs = []
-    
-    for pdf in all_pdfs:
-        temp_hash = hashlib.md5(f"{pdf['filename']}_{pdf['size']}".encode()).hexdigest()
-        
-        if temp_hash in history.get('files', {}):
-            logger.info(f"⏭️ Skipping (HF): {pdf['filename']}")
-            continue
-        
-        progress = get_file_progress(temp_hash)
-        if progress.get('completed', False):
-            logger.info(f"⏭️ Skipping (checkpoint): {pdf['filename']}")
-            continue
-        
-        pending_pdfs.append(pdf)
-    
-    logger.info(f"🆕 Pending PDFs: {len(pending_pdfs)}")
-    
-    if not pending_pdfs:
-        logger.info("✅ No pending PDFs found. Exiting.")
-        return
-    
-    # একে একে প্রক্রিয়াকরণ
-    processed = 0
-    failed = 0
-    skipped = 0
-    resumed = 0
-    total_vectors_processed = 0
-    
-    for pdf in pending_pdfs:
-        try:
-            result = await process_single_pdf(pdf, pdf['folder_title'])
-            
-            if result['status'] == 'success':
-                processed += 1
-                total_vectors_processed += result.get('vectors', 0)
-                if result.get('resumed_from', 1) > 1:
-                    resumed += 1
-            elif result['status'] == 'skipped':
-                skipped += 1
-            else:
-                failed += 1
-        
-        except Exception as e:
-            logger.error(f"❌ Failed: {pdf['filename']} - {e}")
-            failed += 1
-        
-        await asyncio.sleep(1)
-    
-    # ফাইনাল রিপোর্ট
-    logger.info("=" * 60)
-    logger.info("📊 FINAL REPORT")
-    logger.info("=" * 60)
-    logger.info(f"✅ Processed: {processed} ({resumed} resumed from checkpoint)")
-    logger.info(f"⏭️ Skipped: {skipped}")
-    logger.info(f"❌ Failed: {failed}")
-    logger.info(f"📊 Total vectors uploaded: {total_vectors_processed}")
-    logger.info(f"💾 Checkpoint entries: {len(load_page_checkpoint())}")
-    logger.info(f"📁 HF tracking entries: {len(load_upload_history().get('files', {}))}")
-    logger.info("=" * 60)
-
+# ============ মেইন ============
 if __name__ == "__main__":
-    asyncio.run(main())
+    import uvicorn
+    
+    # টেলিগ্রাম বট আলাদা থ্রেডে শুরু
+    bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+    bot_thread.start()
+    
+    # FastAPI সার্ভার শুরু
+    port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 FastAPI server running on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
