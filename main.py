@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (Webhook পদ্ধতি - আপডেটেড)
+একক ফাইল: FastAPI + Telegram Bot (পোলিং পদ্ধতি)
 """
 
 import os
@@ -8,10 +8,12 @@ import io
 import re
 import json
 import time
+import asyncio
+import threading
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
 import fitz  # PyMuPDF
@@ -24,16 +26,11 @@ MEDIAFIRE_PASSWORD = os.environ.get("MEDIAFIRE_PASSWORD")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HF_DATASET = os.environ.get("HF_DATASET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://quran-pdf-image.onrender.com")
 
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 CHECKPOINT_FILE = Path("/tmp/checkpoint.json")
-
-# ============ গ্লোবাল ভ্যারিয়েবল ============
-tg_application = None
-bot = None
-# =============================================
+# =====================================
 
 class ProcessRequest(BaseModel):
     folder_key: str
@@ -42,7 +39,6 @@ class ProcessRequest(BaseModel):
 
 # ============ টেলিগ্রাম ফাংশন ============
 def send_telegram(chat_id, message):
-    """টেলিগ্রামে মেসেজ পাঠায়"""
     if TELEGRAM_BOT_TOKEN:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -52,7 +48,6 @@ def send_telegram(chat_id, message):
             print(f"Telegram error: {e}")
 
 def extract_from_mediafire_url(url):
-    """MediaFire URL থেকে ফোল্ডার কী ও নাম বের করে"""
     key_match = re.search(r'/folder/([a-zA-Z0-9]+)', url)
     if not key_match:
         return None, None
@@ -88,11 +83,7 @@ def get_mediafire_files(folder_key):
     for item in folder_content['folder_content']:
         if item['type'] == 'file' and item['filename'].endswith('.pdf'):
             file_links = api.file_get_links(quickkey=item['quickkey'])
-            download_link = None
-            for link in file_links['links']:
-                if link['type'] == 'normal_download':
-                    download_link = link['normal_download']
-                    break
+            download_link = next((link['normal_download'] for link in file_links['links'] if link['type'] == 'normal_download'), None)
             try:
                 num = int(item['filename'].replace('.pdf', ''))
             except:
@@ -108,8 +99,7 @@ def get_mediafire_files(folder_key):
 def pdf_to_images(pdf_bytes, dpi=300):
     images = []
     pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    total_pages = len(pdf_document)
-    for page_num in range(total_pages):
+    for page_num in range(len(pdf_document)):
         page = pdf_document.load_page(page_num)
         zoom = dpi / 72
         mat = fitz.Matrix(zoom, zoom)
@@ -122,7 +112,7 @@ def pdf_to_images(pdf_bytes, dpi=300):
         })
         del pix
     pdf_document.close()
-    return images, total_pages
+    return images, len(pdf_document)
 
 def upload_to_hf(folder_path, image):
     path_in_repo = f"{folder_path}/{image['name']}"
@@ -204,11 +194,10 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(f"🚀 *প্রসেসিং শুরু হচ্ছে...*\n📂 ফোল্ডার: `{folder_name}`", parse_mode="Markdown")
     
-    # ✅ এখানে গুরুত্বপূর্ণ পরিবর্তন: লোকালহোস্টের বদলে Render URL ব্যবহার করুন
-    render_api_url = RENDER_URL
+    port = os.environ.get('PORT', 8000)
     try:
         response = requests.post(
-            f"{render_api_url}/start_processing",
+            f"http://localhost:{port}/start_processing",
             json={
                 "folder_key": folder_key,
                 "folder_name": folder_name,
@@ -228,9 +217,9 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ বাতিল করা হয়েছে।")
 
 async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    render_api_url = RENDER_URL
+    port = os.environ.get('PORT', 8000)
     try:
-        response = requests.get(f"{render_api_url}/status", timeout=10)
+        response = requests.get(f"http://localhost:{port}/status", timeout=10)
         if response.status_code == 200:
             data = response.json()
             await update.message.reply_text(
@@ -244,63 +233,36 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
-async def webhook_handler(request: Request):
-    """টেলিগ্রাম থেকে আসা ওয়েবহুক রিকোয়েস্ট হ্যান্ডল করে"""
-    if tg_application is None:
-        return {"status": "error", "message": "Bot not initialized"}
+def run_telegram_bot():
+    global tg_application
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    data = await request.json()
-    update = Update.de_json(data, bot)
-    await tg_application.process_update(update)
-    return {"status": "ok"}
+    tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    tg_application.add_handler(CommandHandler('start', tg_start))
+    tg_application.add_handler(CommandHandler('confirm', tg_confirm))
+    tg_application.add_handler(CommandHandler('cancel', tg_cancel))
+    tg_application.add_handler(CommandHandler('status', tg_status))
+    tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
+    
+    print("🤖 Telegram Bot starting (Polling mode)...")
+    tg_application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 # ============ FastAPI অ্যাপ ============
 app = FastAPI()
 
 @app.on_event("startup")
-async def startup_event():
-    """FastAPI শুরু হলে টেলিগ্রাম বট সেটআপ করুন (Webhook)"""
-    global tg_application, bot
+def startup_event():
     if TELEGRAM_BOT_TOKEN:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        
-        # হ্যান্ডলার যোগ করুন
-        tg_application.add_handler(CommandHandler('start', tg_start))
-        tg_application.add_handler(CommandHandler('confirm', tg_confirm))
-        tg_application.add_handler(CommandHandler('cancel', tg_cancel))
-        tg_application.add_handler(CommandHandler('status', tg_status))
-        tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
-        
-        # ইনিশিয়ালাইজ করুন
-        await tg_application.initialize()
-        
-        # ওয়েবহুক সেট করুন
-        webhook_url = f"{RENDER_URL}/webhook"
-        await bot.set_webhook(webhook_url)
-        print(f"🤖 Webhook set to: {webhook_url}")
-        
-        print("🤖 Telegram Bot ready (Webhook mode).")
+        bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+        bot_thread.start()
+        print("🤖 Telegram Bot thread started (Polling mode).")
     else:
-        print("⚠️ TELEGRAM_BOT_TOKEN not set. Bot not started.")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """শাটডাউনের সময় ওয়েবহুক রিমুভ করুন"""
-    if bot:
-        await bot.delete_webhook()
-        print("🤖 Webhook removed.")
-    if tg_application:
-        await tg_application.shutdown()
+        print("⚠️ TELEGRAM_BOT_TOKEN not set.")
 
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    """টেলিগ্রাম ওয়েবহুক এন্ডপয়েন্ট"""
-    return await webhook_handler(request)
 
 @app.post("/start_processing")
 async def start_processing(request: ProcessRequest, background_tasks: BackgroundTasks):
@@ -318,7 +280,6 @@ def get_status():
         "last_page": checkpoint.get('last_page', 0)
     }
 
-# ============ মেইন ============
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
