@@ -1,10 +1,9 @@
-pypdf
-pinecone
-sentence-transformers
-huggingface-hub
+fastapi
+uvicorn
+python-multipart
+requests
 httpx
-Pillow
+mediafire
 PyMuPDF
-internetarchive
-easyocr
-numpy
+huggingface-hub
+python-telegram-bot
