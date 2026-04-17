@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (সঠিক অ্যাসিন্ক সমাধান সহ)
+একক ফাইল: FastAPI + Telegram Bot (আলাদা থ্রেডে বট)
 """
 
 import os
@@ -8,7 +8,8 @@ import io
 import re
 import json
 import time
-import asyncio  # ✅ যোগ করতে হবে
+import asyncio
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -31,9 +32,10 @@ TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 CHECKPOINT_FILE = Path("/tmp/checkpoint.json")
 
-# ============ টেলিগ্রাম বট গ্লোবাল ভ্যারিয়েবল ============
+# ============ গ্লোবাল ভ্যারিয়েবল ============
 tg_application = None
-# ====================================
+tg_thread = None
+# =============================================
 
 class ProcessRequest(BaseModel):
     folder_key: str
@@ -174,7 +176,7 @@ def process_pdfs(folder_key: str, folder_name: str, chat_id: int):
     except Exception as e:
         send_telegram(chat_id, f"❌ *এরর:* `{str(e)[:200]}`")
 
-# ============ টেলিগ্রাম বট হ্যান্ডলার (অ্যাসিন্ক) ============
+# ============ টেলিগ্রাম বট হ্যান্ডলার ============
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 *MediaFire to HuggingFace Processor*\n\n"
@@ -203,10 +205,9 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ আগে একটি MediaFire লিংক দিন।")
         return
     await update.message.reply_text(f"🚀 *প্রসেসিং শুরু হচ্ছে...*\n📂 ফোল্ডার: `{folder_name}`", parse_mode="Markdown")
-    # নিজের API-তে রিকোয়েস্ট
+    
+    port = os.environ.get('PORT', 8000)
     try:
-        # Render-এর পরিবেশে PORT ভেরিয়েবল থাকে, LOCALHOST ব্যবহার করবেন
-        port = os.environ.get('PORT', 8000)
         response = requests.post(
             f"http://localhost:{port}/start_processing",
             json={
@@ -228,15 +229,13 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ বাতিল করা হয়েছে।")
 
 async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    port = os.environ.get('PORT', 8000)
     try:
-        port = os.environ.get('PORT', 8000)
         response = requests.get(f"http://localhost:{port}/status", timeout=10)
         if response.status_code == 200:
             data = response.json()
             await update.message.reply_text(
-                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF\n"
-                f"🔄 চলমান: {data.get('current', 'কিছু না')}\n"
-                f"📄 শেষ পৃষ্ঠা: {data.get('last_page', 0)}",
+                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF",
                 parse_mode="Markdown"
             )
         else:
@@ -244,29 +243,47 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
-# ============ লাইফস্প্যান ম্যানেজার ============
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # স্টার্টআপ: টেলিগ্রাম বট চালু
+def run_telegram_bot():
+    """আলাদা থ্রেডে টেলিগ্রাম বট চালায়"""
     global tg_application
-    if TELEGRAM_BOT_TOKEN:
-        tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        tg_application.add_handler(CommandHandler('start', tg_start))
-        tg_application.add_handler(CommandHandler('confirm', tg_confirm))
-        tg_application.add_handler(CommandHandler('cancel', tg_cancel))
-        tg_application.add_handler(CommandHandler('status', tg_status))
-        tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
-        
-        # ✅ বট চালু (আলাদা টাস্ক হিসেবে)
-        asyncio.create_task(tg_application.run_polling(allowed_updates=Update.ALL_TYPES))
-        print("🤖 Telegram Bot started.")
-    yield
-    # শাটডাউন: বট বন্ধ
-    if tg_application:
-        await tg_application.shutdown()
+    
+    # নতুন ইভেন্ট লুপ তৈরি করুন
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    tg_application.add_handler(CommandHandler('start', tg_start))
+    tg_application.add_handler(CommandHandler('confirm', tg_confirm))
+    tg_application.add_handler(CommandHandler('cancel', tg_cancel))
+    tg_application.add_handler(CommandHandler('status', tg_status))
+    tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
+    
+    print("🤖 Telegram Bot starting...")
+    # ব্লকিং কল, এখানে থাকবে
+    tg_application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 # ============ FastAPI অ্যাপ ============
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
+
+@app.on_event("startup")
+def startup_event():
+    """FastAPI শুরু হলে টেলিগ্রাম বট চালু করুন"""
+    global tg_thread
+    if TELEGRAM_BOT_TOKEN:
+        tg_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+        tg_thread.start()
+        print("🤖 Telegram Bot thread started.")
+    else:
+        print("⚠️ TELEGRAM_BOT_TOKEN not set. Bot not started.")
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """শাটডাউনের সময় বট বন্ধ করুন"""
+    global tg_application
+    if tg_application:
+        print("🤖 Shutting down Telegram Bot...")
+        # বট বন্ধ করার জন্য সিগন্যাল
+        tg_application.stop_running()
 
 @app.get("/")
 def root():
