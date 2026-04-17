@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (পোলিং পদ্ধতি)
+একক ফাইল: FastAPI + Telegram Bot (সরল পোলিং পদ্ধতি)
 """
 
 import os
@@ -8,12 +8,10 @@ import io
 import re
 import json
 import time
-import asyncio
-import threading
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from telegram import Update
+from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
 import fitz  # PyMuPDF
@@ -30,6 +28,9 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 CHECKPOINT_FILE = Path("/tmp/checkpoint.json")
+
+# গ্লোবাল ভেরিয়েবল
+application = None
 # =====================================
 
 class ProcessRequest(BaseModel):
@@ -39,6 +40,7 @@ class ProcessRequest(BaseModel):
 
 # ============ টেলিগ্রাম ফাংশন ============
 def send_telegram(chat_id, message):
+    """টেলিগ্রামে মেসেজ পাঠায়"""
     if TELEGRAM_BOT_TOKEN:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -48,6 +50,7 @@ def send_telegram(chat_id, message):
             print(f"Telegram error: {e}")
 
 def extract_from_mediafire_url(url):
+    """MediaFire URL থেকে ফোল্ডার কী ও নাম বের করে"""
     key_match = re.search(r'/folder/([a-zA-Z0-9]+)', url)
     if not key_match:
         return None, None
@@ -83,7 +86,11 @@ def get_mediafire_files(folder_key):
     for item in folder_content['folder_content']:
         if item['type'] == 'file' and item['filename'].endswith('.pdf'):
             file_links = api.file_get_links(quickkey=item['quickkey'])
-            download_link = next((link['normal_download'] for link in file_links['links'] if link['type'] == 'normal_download'), None)
+            download_link = None
+            for link in file_links['links']:
+                if link['type'] == 'normal_download':
+                    download_link = link['normal_download']
+                    break
             try:
                 num = int(item['filename'].replace('.pdf', ''))
             except:
@@ -99,7 +106,8 @@ def get_mediafire_files(folder_key):
 def pdf_to_images(pdf_bytes, dpi=300):
     images = []
     pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page_num in range(len(pdf_document)):
+    total_pages = len(pdf_document)
+    for page_num in range(total_pages):
         page = pdf_document.load_page(page_num)
         zoom = dpi / 72
         mat = fitz.Matrix(zoom, zoom)
@@ -112,7 +120,7 @@ def pdf_to_images(pdf_bytes, dpi=300):
         })
         del pix
     pdf_document.close()
-    return images, len(pdf_document)
+    return images, total_pages
 
 def upload_to_hf(folder_path, image):
     path_in_repo = f"{folder_path}/{image['name']}"
@@ -164,7 +172,7 @@ def process_pdfs(folder_key: str, folder_name: str, chat_id: int):
     except Exception as e:
         send_telegram(chat_id, f"❌ *এরর:* `{str(e)[:200]}`")
 
-# ============ টেলিগ্রাম বট হ্যান্ডলার ============
+# ============ টেলিগ্রাম বট হ্যান্ডলার (সিঙ্ক্রোনাস) ============
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 *MediaFire to HuggingFace Processor*\n\n"
@@ -223,9 +231,7 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response.status_code == 200:
             data = response.json()
             await update.message.reply_text(
-                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF\n"
-                f"🔄 চলমান: {data.get('current', 'কিছু না')}\n"
-                f"📄 শেষ পৃষ্ঠা: {data.get('last_page', 0)}",
+                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF",
                 parse_mode="Markdown"
             )
         else:
@@ -233,35 +239,47 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ অবস্থা পাওয়া যায়নি: {e}")
 
-def run_telegram_bot():
-    global tg_application
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    tg_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    tg_application.add_handler(CommandHandler('start', tg_start))
-    tg_application.add_handler(CommandHandler('confirm', tg_confirm))
-    tg_application.add_handler(CommandHandler('cancel', tg_cancel))
-    tg_application.add_handler(CommandHandler('status', tg_status))
-    tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
-    
-    print("🤖 Telegram Bot starting (Polling mode)...")
-    tg_application.run_polling(allowed_updates=Update.ALL_TYPES)
+def setup_bot():
+    """বট সেটআপ করে (একবার)"""
+    global application
+    if application is None:
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        application.add_handler(CommandHandler('start', tg_start))
+        application.add_handler(CommandHandler('confirm', tg_confirm))
+        application.add_handler(CommandHandler('cancel', tg_cancel))
+        application.add_handler(CommandHandler('status', tg_status))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
+        print("🤖 Telegram Bot handlers set up.")
+
+def process_telegram_updates():
+    """সকল পেন্ডিং আপডেট প্রসেস করে (প্রতি রিকোয়েস্টে কল হবে)"""
+    global application
+    if application:
+        try:
+            # সিঙ্ক্রোনাস আপডেট প্রসেসিং
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            updates = bot.get_updates(allowed_updates=Update.ALL_TYPES, timeout=1)
+            for update in updates:
+                application.process_update(update)
+        except Exception as e:
+            print(f"Update processing error: {e}")
 
 # ============ FastAPI অ্যাপ ============
 app = FastAPI()
 
 @app.on_event("startup")
 def startup_event():
+    """FastAPI শুরু হলে বট সেটআপ করুন"""
     if TELEGRAM_BOT_TOKEN:
-        bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
-        bot_thread.start()
-        print("🤖 Telegram Bot thread started (Polling mode).")
+        setup_bot()
+        print("🤖 Telegram Bot ready.")
     else:
         print("⚠️ TELEGRAM_BOT_TOKEN not set.")
 
 @app.get("/")
 def root():
+    # প্রতি রিকোয়েস্টে পেন্ডিং আপডেট চেক করুন
+    process_telegram_updates()
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
 
 @app.post("/start_processing")
@@ -280,6 +298,7 @@ def get_status():
         "last_page": checkpoint.get('last_page', 0)
     }
 
+# ============ মেইন ============
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
