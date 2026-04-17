@@ -8,6 +8,7 @@ import io
 import re
 import json
 import time
+import asyncio  # ✅ যোগ করতে হবে
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -204,8 +205,10 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🚀 *প্রসেসিং শুরু হচ্ছে...*\n📂 ফোল্ডার: `{folder_name}`", parse_mode="Markdown")
     # নিজের API-তে রিকোয়েস্ট
     try:
+        # Render-এর পরিবেশে PORT ভেরিয়েবল থাকে, LOCALHOST ব্যবহার করবেন
+        port = os.environ.get('PORT', 8000)
         response = requests.post(
-            f"http://localhost:{os.environ.get('PORT', 8000)}/start_processing",
+            f"http://localhost:{port}/start_processing",
             json={
                 "folder_key": folder_key,
                 "folder_name": folder_name,
@@ -214,7 +217,7 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeout=5
         )
         if response.status_code == 200:
-            await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!")
+            await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!\nসমাপ্ত হলে আমি জানিয়ে দেব।")
         else:
             await update.message.reply_text(f"⚠️ সার্ভার এরর: {response.status_code}")
     except Exception as e:
@@ -226,11 +229,14 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        response = requests.get(f"http://localhost:{os.environ.get('PORT', 8000)}/status", timeout=10)
+        port = os.environ.get('PORT', 8000)
+        response = requests.get(f"http://localhost:{port}/status", timeout=10)
         if response.status_code == 200:
             data = response.json()
             await update.message.reply_text(
-                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF",
+                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF\n"
+                f"🔄 চলমান: {data.get('current', 'কিছু না')}\n"
+                f"📄 শেষ পৃষ্ঠা: {data.get('last_page', 0)}",
                 parse_mode="Markdown"
             )
         else:
@@ -251,7 +257,7 @@ async def lifespan(app: FastAPI):
         tg_application.add_handler(CommandHandler('status', tg_status))
         tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
         
-        # বট চালু (আলাদা টাস্ক হিসেবে)
+        # ✅ বট চালু (আলাদা টাস্ক হিসেবে)
         asyncio.create_task(tg_application.run_polling(allowed_updates=Update.ALL_TYPES))
         print("🤖 Telegram Bot started.")
     yield
