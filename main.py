@@ -173,7 +173,7 @@ def process_pdfs(folder_key: str, folder_name: str, chat_id: int):
     except Exception as e:
         send_telegram(chat_id, f"❌ *এরর:* `{str(e)[:200]}`")
 
-# ============ টেলিগ্রাম বট হ্যান্ডলার (অ্যাসিন্ক) ============
+# ============ টেলিগ্রাম বট হ্যান্ডলার ============
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 *MediaFire to HuggingFace Processor*\n\n"
@@ -245,6 +245,10 @@ async def process_telegram_updates():
     global application, bot
     if application and bot:
         try:
+            # bot ইনিশিয়ালাইজড কিনা নিশ্চিত করুন
+            if not bot._initialized:
+                await bot.initialize()
+            
             updates = await bot.get_updates(allowed_updates=Update.ALL_TYPES, timeout=1)
             for update in updates:
                 await application.process_update(update)
@@ -252,12 +256,17 @@ async def process_telegram_updates():
             print(f"Update processing error: {e}")
 
 async def setup_bot():
-    """বট সেটআপ করে (একবার) - অ্যাসিন্ক ফাংশন"""
+    """বট সেটআপ করে - সম্পূর্ণ ইনিশিয়ালাইজেশন সহ"""
     global application, bot
     if TELEGRAM_BOT_TOKEN:
+        # Bot তৈরি
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        # Bot ইনিশিয়ালাইজ করুন
+        await bot.initialize()
+        
+        # Application তৈরি
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        # ✅ গুরুত্বপূর্ণ: application.initialize() কল করতে হবে
+        # Application ইনিশিয়ালাইজ করুন
         await application.initialize()
         
         # হ্যান্ডলার যোগ করুন
@@ -267,7 +276,9 @@ async def setup_bot():
         application.add_handler(CommandHandler('status', tg_status))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
         
-        print("🤖 Telegram Bot handlers set up and initialized.")
+        print("🤖 Telegram Bot fully initialized and ready.")
+    else:
+        print("⚠️ TELEGRAM_BOT_TOKEN not set.")
 
 # ============ FastAPI অ্যাপ ============
 app = FastAPI()
@@ -275,11 +286,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     """FastAPI শুরু হলে বট সেটআপ করুন"""
-    if TELEGRAM_BOT_TOKEN:
-        await setup_bot()
-        print("🤖 Telegram Bot ready.")
-    else:
-        print("⚠️ TELEGRAM_BOT_TOKEN not set.")
+    await setup_bot()
 
 @app.get("/")
 async def root():
