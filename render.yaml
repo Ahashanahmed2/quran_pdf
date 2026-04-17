@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: tafsir-processor
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: MEDIAFIRE_EMAIL
+        sync: false
+      - key: MEDIAFIRE_PASSWORD
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_DATASET
+        value: ahashanahmed/tafsir-images
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
