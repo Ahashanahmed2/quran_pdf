@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (Webhook পদ্ধতি - সবচেয়ে নির্ভরযোগ্য)
+একক ফাইল: FastAPI + Telegram Bot (Webhook পদ্ধতি - আপডেটেড)
 """
 
 import os
@@ -204,10 +204,11 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(f"🚀 *প্রসেসিং শুরু হচ্ছে...*\n📂 ফোল্ডার: `{folder_name}`", parse_mode="Markdown")
     
-    port = os.environ.get('PORT', 8000)
+    # ✅ এখানে গুরুত্বপূর্ণ পরিবর্তন: লোকালহোস্টের বদলে Render URL ব্যবহার করুন
+    render_api_url = RENDER_URL
     try:
         response = requests.post(
-            f"http://localhost:{port}/start_processing",
+            f"{render_api_url}/start_processing",
             json={
                 "folder_key": folder_key,
                 "folder_name": folder_name,
@@ -227,13 +228,15 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ বাতিল করা হয়েছে।")
 
 async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    port = os.environ.get('PORT', 8000)
+    render_api_url = RENDER_URL
     try:
-        response = requests.get(f"http://localhost:{port}/status", timeout=10)
+        response = requests.get(f"{render_api_url}/status", timeout=10)
         if response.status_code == 200:
             data = response.json()
             await update.message.reply_text(
-                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF",
+                f"📊 *বর্তমান অবস্থা:*\n✅ প্রসেস হয়েছে: {data.get('processed', 0)}টি PDF\n"
+                f"🔄 চলমান: {data.get('current', 'কিছু না')}\n"
+                f"📄 শেষ পৃষ্ঠা: {data.get('last_page', 0)}",
                 parse_mode="Markdown"
             )
         else:
@@ -269,7 +272,7 @@ async def startup_event():
         tg_application.add_handler(CommandHandler('status', tg_status))
         tg_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
         
-        # ইনিশিয়ালাইজ করুন (শুধু হ্যান্ডলার সেটআপের জন্য)
+        # ইনিশিয়ালাইজ করুন
         await tg_application.initialize()
         
         # ওয়েবহুক সেট করুন
