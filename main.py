@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (সঠিক অ্যাসিন্ক পোলিং)
+একক ফাইল: FastAPI + Telegram Bot (সঠিক ইনিশিয়ালাইজেশন সহ)
 """
 
 import os
@@ -8,7 +8,6 @@ import io
 import re
 import json
 import time
-import asyncio
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -252,27 +251,32 @@ async def process_telegram_updates():
         except Exception as e:
             print(f"Update processing error: {e}")
 
-def setup_bot():
-    """বট সেটআপ করে (একবার)"""
+async def setup_bot():
+    """বট সেটআপ করে (একবার) - অ্যাসিন্ক ফাংশন"""
     global application, bot
-    if application is None and TELEGRAM_BOT_TOKEN:
+    if TELEGRAM_BOT_TOKEN:
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # ✅ গুরুত্বপূর্ণ: application.initialize() কল করতে হবে
+        await application.initialize()
+        
+        # হ্যান্ডলার যোগ করুন
         application.add_handler(CommandHandler('start', tg_start))
         application.add_handler(CommandHandler('confirm', tg_confirm))
         application.add_handler(CommandHandler('cancel', tg_cancel))
         application.add_handler(CommandHandler('status', tg_status))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
-        print("🤖 Telegram Bot handlers set up.")
+        
+        print("🤖 Telegram Bot handlers set up and initialized.")
 
 # ============ FastAPI অ্যাপ ============
 app = FastAPI()
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     """FastAPI শুরু হলে বট সেটআপ করুন"""
     if TELEGRAM_BOT_TOKEN:
-        setup_bot()
+        await setup_bot()
         print("🤖 Telegram Bot ready.")
     else:
         print("⚠️ TELEGRAM_BOT_TOKEN not set.")
