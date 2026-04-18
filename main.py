@@ -928,7 +928,7 @@ app = FastAPI(lifespan=lifespan)
 async def root():
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
 
-    @app.get("/my-folders")
+@app.get("/my-folders")
 async def my_folders():
     """আপনার MediaFire অ্যাকাউন্টের সব ফোল্ডার দেখুন"""
     try:
