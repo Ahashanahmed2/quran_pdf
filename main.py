@@ -725,8 +725,6 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
-# ============ Telegram Bot Setup ============
-async def setup_bot():
     global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
     global _bot_initialized, _updater_started
 
