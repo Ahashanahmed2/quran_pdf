@@ -1283,6 +1283,63 @@ async def test_mediafire():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.get("/root-folder")
+async def root_folder():
+    """আপনার রুট ফোল্ডারের কন্টেন্ট দেখুন"""
+    try:
+        import json
+        
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        api.session = session
+        
+        # রুট ফোল্ডার (folder_key ছাড়া)
+        content = api.folder_get_content()
+        
+        if isinstance(content, str):
+            content = json.loads(content)
+        
+        # response কী এর ভিতরে চেক করুন
+        if 'response' in content:
+            folder_content = content.get('response', {}).get('folder_content', [])
+        else:
+            folder_content = content.get('folder_content', [])
+        
+        files = []
+        folders = []
+        
+        for item in folder_content:
+            if isinstance(item, dict):
+                if item.get('type') == 'file':
+                    files.append({
+                        'name': item.get('filename'),
+                        'quickkey': item.get('quickkey')
+                    })
+                elif item.get('type') == 'folder':
+                    folders.append({
+                        'name': item.get('name'),
+                        'folderkey': item.get('folderkey')
+                    })
+        
+        return {
+            "status": "success",
+            "total_folders": len(folders),
+            "total_files": len(files),
+            "folders": folders,
+            "files": files[:20]
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error", 
+            "message": str(e),
+            "traceback": traceback.format_exc()[:500]
+        }
+
 @app.post("/start_processing")
 async def start_processing(request: ProcessRequest):
     if not request.folder_key or not request.folder_name:
