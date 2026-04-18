@@ -691,6 +691,60 @@ async def get_tasks():
     async with running_tasks_lock:
         return {k: v for k, v in running_tasks.items()}
 
+@app.get("/start/{folder_name}")
+async def start_processing_simple(folder_name: str):
+    """সরাসরি URL দিয়ে প্রসেসিং শুরু করুন"""
+    try:
+        # আপনার PDF লিংকগুলো
+        pdf_urls = [
+            "https://archive.org/download/20260415_20260415_0945/1.pdf",
+            "https://archive.org/download/20260415_20260415_0945/2.pdf",
+            # ... বাকি 22 পর্যন্ত
+        ]
+        
+        task_id = f"direct_api_{int(time.time())}"
+        
+        # থ্রেডে প্রসেসিং শুরু
+        thread = threading.Thread(
+            target=run_async_in_thread,
+            args=(process_pdf_urls, pdf_urls, folder_name, 0, task_id),
+            daemon=True
+        )
+        thread.start()
+        
+        return {
+            "status": "started",
+            "message": f"Processing {len(pdf_urls)} PDFs",
+            "folder": folder_name,
+            "task_id": task_id
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/start-one/{folder_name}")
+async def start_one_pdf(folder_name: str):
+    """শুধু ১টি PDF দিয়ে টেস্ট করুন"""
+    try:
+        pdf_urls = ["https://archive.org/download/20260415_20260415_0945/1.pdf"]
+        
+        task_id = f"test_{int(time.time())}"
+        
+        thread = threading.Thread(
+            target=run_async_in_thread,
+            args=(process_pdf_urls, pdf_urls, folder_name, 0, task_id),
+            daemon=True
+        )
+        thread.start()
+        
+        return {
+            "status": "started",
+            "message": f"Processing 1 PDF",
+            "folder": folder_name
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # ============ মেইন ============
 if __name__ == "__main__":
     import uvicorn
