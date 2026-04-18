@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (Production Ready - Pure Async Pattern)
+একক ফাইল: FastAPI + Telegram Bot (Production Ready - Fixed Event Loop Conflict)
 """
 
 import os
@@ -13,6 +13,7 @@ import asyncio
 import shutil
 import traceback
 import gc
+import tempfile
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -53,16 +54,14 @@ PAGE_HASH_CACHE_SIZE = 10000
 # Job timeout (6 hours)
 MAX_JOB_RUNTIME = 6 * 3600
 
-# MediaFire rate limit
-MEDIAFIRE_RATE_LIMIT = 1.0
+# MediaFire API delay
+MEDIAFIRE_API_DELAY = 0.5
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
 application = None
 mediafire_session = None
 mediafire_session_lock = asyncio.Lock()
-sync_http_client = None
-polling_task = None
 
 # Task management
 running_tasks = {}
@@ -88,17 +87,15 @@ page_hash_cache_lock = asyncio.Lock()
 # Checkpoint async writer
 checkpoint_write_queue = asyncio.Queue()
 checkpoint_writer_task = None
+checkpoint_lock = asyncio.Lock()
 
 # Disk cleanup task
 disk_cleanup_task = None
 
-# Checkpoint lock
-checkpoint_lock = asyncio.Lock()
-
 # Shutdown flag
 shutdown_in_progress = False
 
-# Token bucket rate limiter
+# MediaFire rate limiter
 class TokenBucket:
     def __init__(self, rate, capacity):
         self.rate = rate
@@ -118,14 +115,13 @@ class TokenBucket:
                 self.tokens -= tokens
                 return True
             
-            # Wait for tokens
             wait_time = (tokens - self.tokens) / self.rate
             self.last_refill = now
             await asyncio.sleep(wait_time)
             self.tokens = 0
             return True
 
-mediafire_rate_limiter = TokenBucket(rate=MEDIAFIRE_RATE_LIMIT, capacity=MEDIAFIRE_RATE_LIMIT * 2)
+mediafire_rate_limiter = TokenBucket(rate=1.0, capacity=2.0)
 
 class ProcessRequest(BaseModel):
     folder_key: str
@@ -150,7 +146,7 @@ async def check_disk_space():
 async def disk_cleanup_worker():
     """Periodic cleanup of old temp files"""
     while not shutdown_in_progress:
-        await asyncio.sleep(1800)  # Every 30 minutes
+        await asyncio.sleep(1800)
         try:
             now = time.time()
             for f in TEMP_DIR.glob("*"):
@@ -328,41 +324,6 @@ async def get_mediafire_session():
                 raise
         return mediafire_session
 
-async def refresh_mediafire_session():
-    global mediafire_session
-    async with mediafire_session_lock:
-        try:
-            api = MediaFireApi()
-            session = api.user_get_session_token(
-                email=MEDIAFIRE_EMAIL, 
-                password=MEDIAFIRE_PASSWORD, 
-                app_id='42511'
-            )
-            api.session = session
-            mediafire_session = api
-            print("🔄 MediaFire session refreshed")
-        except Exception as e:
-            print(f"⚠️ Failed to refresh MediaFire session: {e}")
-
-# ============ Retry Decorator ============
-def retry(max_retries=3, base_delay=2, refresh_session=False):
-    def decorator(func):
-        async def async_wrapper(*args, **kwargs):
-            for i in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    if refresh_session and i < max_retries - 1:
-                        await refresh_mediafire_session()
-                    if i == max_retries - 1:
-                        raise
-                    delay = base_delay * (2 ** i)
-                    print(f"Retry {i+1}/{max_retries} for {func.__name__}: {e}, waiting {delay}s")
-                    await asyncio.sleep(delay)
-            return None
-        return async_wrapper
-    return decorator
-
 # ============ PDF প্রসেসিং ফাংশন ============
 def extract_from_mediafire_url(url):
     key_match = re.search(r'/folder/([a-zA-Z0-9]+)', url)
@@ -437,13 +398,11 @@ async def upload_to_hf_with_retry(folder_path, file_path, img_name, page_hash):
             await asyncio.sleep(wait_time)
     return False
 
-@retry(max_retries=3, base_delay=2, refresh_session=True)
 async def get_mediafire_files(folder_key):
     await mediafire_rate_limiter.acquire()
     
     api = await get_mediafire_session()
     
-    # Run blocking API call in thread pool
     def sync_call():
         return api.folder_get_content(folder_key=folder_key)
     
@@ -452,7 +411,6 @@ async def get_mediafire_files(folder_key):
     files = []
     for item in folder_content['folder_content']:
         if item['type'] == 'file' and item['filename'].endswith('.pdf'):
-            
             def sync_file_links():
                 return api.file_get_links(quickkey=item['quickkey'])
             
@@ -537,7 +495,6 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
             pix = None
             page = None
             
-            # Create async task
             task = asyncio.create_task(upload_to_hf_with_retry(full_hf_path, tmp_path, img_name, page_hash))
             batch_tasks.append((task, page_num + 1, page_hash))
             pages_processed += 1
@@ -717,7 +674,6 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with task_controls_lock:
         task_controls[task_id] = {"cancel": False}
     
-    # Run as async task (pure async)
     asyncio.create_task(process_pdfs(folder_key, folder_name, update.effective_chat.id, task_id))
     
     await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!\nসমাপ্ত হলে আমি জানিয়ে দেব।\n/cancel দিয়ে বন্ধ করতে পারেন।\n/status দিয়ে অগ্রগতি দেখুন।")
@@ -763,9 +719,8 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
-    global application, polling_task, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
+    global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
     
-    # Start background workers
     telegram_worker_task = asyncio.create_task(telegram_worker())
     checkpoint_writer_task = asyncio.create_task(checkpoint_writer_worker())
     disk_cleanup_task = asyncio.create_task(disk_cleanup_worker())
@@ -782,29 +737,26 @@ async def setup_bot():
     application.add_handler(CommandHandler('status', tg_status))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
     
-    polling_task = asyncio.create_task(
-        application.run_polling(
-            close_loop=False,
-            stop_signals=None
-        )
-    )
+    # ✅ CRITICAL FIX: Initialize and start without run_polling
+    await application.initialize()
+    await application.start()
     
-    print("🤖 Telegram bot running (pure async mode)")
+    # ✅ Start updater directly (non-blocking)
+    asyncio.create_task(application.updater.start_polling())
+    
+    print("🤖 Telegram bot running (clean async mode)")
 
 async def shutdown_bot():
-    global shutdown_in_progress, polling_task, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task, application
+    global shutdown_in_progress, application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
     
     shutdown_in_progress = True
     print("🛑 Shutting down...")
     
-    # Cancel all tasks
-    if polling_task:
-        polling_task.cancel()
-        try:
-            await polling_task
-        except asyncio.CancelledError:
-            pass
+    # Stop updater first
+    if application and hasattr(application, 'updater') and application.updater:
+        await application.updater.stop()
     
+    # Cancel all tasks
     if telegram_worker_task:
         await telegram_queue.put(None)
         telegram_worker_task.cancel()
