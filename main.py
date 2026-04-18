@@ -928,6 +928,51 @@ app = FastAPI(lifespan=lifespan)
 async def root():
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
 
+    @app.get("/my-folders")
+async def my_folders():
+    """আপনার MediaFire অ্যাকাউন্টের সব ফোল্ডার দেখুন"""
+    try:
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        api.session = session
+        
+        # রুট ফোল্ডার কন্টেন্ট
+        root_content = api.folder_get_content()
+        
+        folders = []
+        
+        def extract_folders(content, path=""):
+            for item in content.get('folder_content', []):
+                if item.get('type') == 'folder':
+                    folder_info = {
+                        'name': item.get('name'),
+                        'key': item.get('folderkey'),
+                        'path': path + '/' + item.get('name') if path else item.get('name')
+                    }
+                    folders.append(folder_info)
+                    
+                    # সাবফোল্ডার দেখতে চাইলে আনকমেন্ট করুন
+                    # try:
+                    #     sub_content = api.folder_get_content(folder_key=item.get('folderkey'))
+                    #     extract_folders(sub_content, folder_info['path'])
+                    # except:
+                    #     pass
+        
+        extract_folders(root_content)
+        
+        return {
+            "status": "success",
+            "total_folders": len(folders),
+            "folders": folders,
+            "account_email": MEDIAFIRE_EMAIL
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # FastAPI অ্যাপ সেকশনে যোগ করুন (lifespan এর পরে)
 
 @app.get("/test-folder/{folder_key}")
