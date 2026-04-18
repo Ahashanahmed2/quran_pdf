@@ -699,62 +699,82 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_
             f"└── ..."
         )
 
-async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id: str):
-    clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
-    await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু হয়েছে!\n\n📁 ফোল্ডার: {clean_folder_name}")
+async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_id: str):
+    """একাধিক সরাসরি PDF লিংক প্রসেস করার ফাংশন"""
+    clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '').replace('ক', 'ক').replace('খ', 'খ').replace('গ', 'গ')
+    await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু হয়েছে!\n\n📁 ডেটাসেট ফোল্ডার: {clean_folder_name}")
+    await throttled_send(chat_id, f"📚 {len(pdf_urls)}টি PDF পাওয়া গেছে।")
 
     overall_start_time = time.time()
     is_cancelled = False
+    processed = []
+    
+    checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
+    already_processed = set(checkpoint.get('processed', []))
 
-    try:
-        await throttled_send(chat_id, f"🔍 MediaFire থেকে ফাইল তালিকা আনা হচ্ছে...")
+    for idx, url in enumerate(pdf_urls):
+        if shutdown_in_progress or await is_task_cancelled(task_id):
+            is_cancelled = True
+            await throttled_send(chat_id, f"⛔ Task cancelled")
+            break
+
+        if time.time() - overall_start_time > MAX_JOB_RUNTIME:
+            await throttled_send(chat_id, f"⏰ Job timeout")
+            break
+
+        # URL থেকে ফাইল নাম্বার বের করুন
+        name_match = re.search(r'/(\d+)\.pdf', url)
+        if name_match:
+            pdf_number = int(name_match.group(1))
+            pdf_name = f"{pdf_number}.pdf"
+        else:
+            pdf_number = idx + 1
+            pdf_name = f"file_{idx+1}.pdf"
         
-        pdf_files = await get_mediafire_files(folder_key)
+        if pdf_name in already_processed:
+            await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf_name} (আগেই প্রসেস করা হয়েছে)")
+            continue
         
-        if not pdf_files:
-            await throttled_send(chat_id, "❌ কোনো PDF পাওয়া যায়নি!\n\nসম্ভাব্য কারণ:\n• ফোল্ডার খালি\n• ফোল্ডার প্রাইভেট\n• API সংযোগ সমস্যা\n\n/folders দিয়ে আপনার ফোল্ডার দেখুন")
-            return
-            
-        await throttled_send(chat_id, f"📚 {len(pdf_files)}টি PDF পাওয়া গেছে।")
+        # 🔥 CRITICAL FIX: সঠিক ডাউনলোড URL তৈরি
+        quick_key = re.search(r'/file/([a-zA-Z0-9]+)/', url)
+        if quick_key:
+            # সঠিক ডাউনলোড URL - www এর পরিবর্তে download
+            download_url = f"https://download.mediafire.com/file/{quick_key.group(1)}/{pdf_name}"
+        else:
+            download_url = url
+        
+        pdf = {
+            'name': pdf_name,
+            'number': pdf_number,
+            'download_link': download_url
+        }
+        
+        await throttled_send(chat_id, f"📖 [{idx+1}/{len(pdf_urls)}] শুরু: {pdf_name}")
+        await throttled_send(chat_id, f"🔗 ডাউনলোড লিংক: {download_url[:50]}...")
 
-        checkpoint = await load_checkpoint(folder_key)
-        processed = set(checkpoint.get('processed', []))
+        try:
+            pages_processed, total_pages, cancelled = await process_single_pdf(
+                pdf, clean_folder_name, f"direct_{clean_folder_name}", chat_id, checkpoint, task_id
+            )
 
-        for idx, pdf in enumerate(pdf_files):
-            if shutdown_in_progress or await is_task_cancelled(task_id):
+            if cancelled:
                 is_cancelled = True
-                await throttled_send(chat_id, f"⛔ Task cancelled")
                 break
 
-            if time.time() - overall_start_time > MAX_JOB_RUNTIME:
-                await throttled_send(chat_id, f"⏰ Job timeout")
-                break
+            processed.append(pdf_name)
+            checkpoint['processed'] = list(set(checkpoint.get('processed', []) + [pdf_name]))
+            checkpoint['current'] = None
+            checkpoint['last_page'] = 0
+            await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
 
-            if pdf['name'] in processed:
-                await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf['name']} (আগেই প্রসেস করা হয়েছে)")
-                continue
+            await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf_name}\n📄 {total_pages} পৃষ্ঠা, 🚀 {pages_processed} আপলোড")
 
-            await throttled_send(chat_id, f"📖 [{idx+1}/{len(pdf_files)}] শুরু: {pdf['name']}")
+        except Exception as e:
+            error_msg = str(e)[:300]
+            await throttled_send(chat_id, f"❌ ব্যর্থ: {pdf_name}\nত্রুটি: {error_msg}")
+            continue
 
-            try:
-                pages_processed, total_pages, cancelled = await process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id)
-
-                if cancelled:
-                    is_cancelled = True
-                    break
-
-                processed.add(pdf['name'])
-                checkpoint['processed'] = list(processed)
-                checkpoint['current'] = None
-                checkpoint['last_page'] = 0
-                await async_save_checkpoint(folder_key, checkpoint)
-
-                await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf['name']}\n📄 {total_pages} পৃষ্ঠা, 🚀 {pages_processed} পৃষ্ঠা প্রসেসিত")
-
-            except Exception as e:
-                error_msg = str(e)[:300]
-                await throttled_send(chat_id, f"❌ ব্যর্থ: {pdf['name']}\nত্রুটি: {error_msg}")
-                continue
+    # বাকি কোড অপরিবর্তিত...
 
         async with running_tasks_lock:
             if task_id in running_tasks:
