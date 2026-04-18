@@ -989,41 +989,41 @@ async def my_folders():
         )
         api.session = session
         
-        # রুট ফোল্ডার কন্টেন্ট
+        # রুট ফোল্ডার কন্টেন্ট - এটি dict রিটার্ন করে
         root_content = api.folder_get_content()
         
-        # ডিবাগ প্রিন্ট
         print(f"[DEBUG] Root content type: {type(root_content)}")
-        print(f"[DEBUG] Root content: {root_content}")
-        
-        # স্ট্রিং থেকে dict এ কনভার্ট
-        if isinstance(root_content, str):
-            try:
-                root_content = json.loads(root_content)
-            except:
-                return {
-                    "status": "error", 
-                    "message": "Failed to parse JSON response",
-                    "raw": root_content[:500]
-                }
         
         folders = []
         
-        if isinstance(root_content, dict):
-            folder_content = root_content.get('folder_content', [])
-            
-            for item in folder_content:
-                if isinstance(item, dict) and item.get('type') == 'folder':
-                    folder_info = {
-                        'name': item.get('name', 'Unknown'),
-                        'key': item.get('folderkey', 'Unknown'),
-                        'created': item.get('created', 'Unknown')
-                    }
-                    folders.append(folder_info)
+        # সরাসরি dict হিসেবে ব্যবহার করুন
+        folder_content = root_content.get('folder_content', [])
+        
+        for item in folder_content:
+            if item.get('type') == 'folder':
+                folder_info = {
+                    'name': item.get('name', 'Unknown'),
+                    'key': item.get('folderkey', 'Unknown'),
+                    'created': item.get('created', 'Unknown')
+                }
+                folders.append(folder_info)
+                
+                # সাবফোল্ডারে ফাইল চেক করুন
+                try:
+                    sub_content = api.folder_get_content(folder_key=item.get('folderkey'))
+                    sub_files = sub_content.get('folder_content', [])
+                    folder_info['file_count'] = len([f for f in sub_files if f.get('type') == 'file'])
+                except:
+                    folder_info['file_count'] = 'Unknown'
+        
+        # রুট ফোল্ডারের ফাইল
+        root_files = [f for f in folder_content if f.get('type') == 'file']
         
         return {
             "status": "success",
             "total_folders": len(folders),
+            "total_root_files": len(root_files),
+            "root_files": [f.get('filename') for f in root_files[:10]],
             "folders": folders,
             "account_email": MEDIAFIRE_EMAIL
         }
@@ -1034,6 +1034,49 @@ async def my_folders():
             "message": str(e),
             "traceback": traceback.format_exc()[:1000]
         }
+
+@app.get("/test-folder-fixed/{folder_key}")
+async def test_folder_fixed(folder_key: str):
+    """MediaFire ফোল্ডার কন্টেন্ট টেস্ট - ফিক্সড ভার্সন"""
+    try:
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        api.session = session
+        
+        # ফোল্ডার কন্টেন্ট
+        content = api.folder_get_content(folder_key=folder_key)
+        
+        files = []
+        folders = []
+        
+        for item in content.get('folder_content', []):
+            item_type = item.get('type')
+            if item_type == 'file':
+                files.append({
+                    'name': item.get('filename'),
+                    'quickkey': item.get('quickkey'),
+                    'size': item.get('size')
+                })
+            elif item_type == 'folder':
+                folders.append({
+                    'name': item.get('name'),
+                    'folderkey': item.get('folderkey')
+                })
+        
+        return {
+            "status": "success",
+            "folder_key": folder_key,
+            "total_folders": len(folders),
+            "total_files": len(files),
+            "folders": folders[:10],
+            "files": files[:10]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/raw-test")
 async def raw_test():
