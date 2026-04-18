@@ -762,6 +762,27 @@ async def process_form(request: Request):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.get("/test-process")
+async def test_process():
+    """প্রসেসিং টেস্ট করুন"""
+    try:
+        url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
+        print(f"[TEST] Downloading: {url}", flush=True)
+        
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream("GET", url) as response:
+                async for chunk in response.aiter_bytes():
+                    temp_file.write(chunk)
+        temp_file.close()
+        
+        size = os.path.getsize(temp_file.name)
+        os.unlink(temp_file.name)
+        
+        return {"status": "success", "downloaded_bytes": size}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/tasks")
 async def get_tasks():
     """চলমান টাস্ক দেখুন"""
