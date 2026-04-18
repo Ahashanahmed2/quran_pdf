@@ -19,7 +19,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import httpx
 import fitz  # PyMuPDF
@@ -407,35 +407,49 @@ async def upload_to_hf_with_retry(folder_path, file_path, img_name, page_hash):
 async def get_mediafire_files(folder_key):
     await mediafire_rate_limiter.acquire()
 
-    api = await get_mediafire_session()
+    try:
+        api = await get_mediafire_session()
+    except Exception as e:
+        print(f"[MediaFire] Session error: {e}")
+        return []
 
     def sync_call():
         return api.folder_get_content(folder_key=folder_key)
 
-    folder_content = await asyncio.to_thread(sync_call)
+    try:
+        folder_content = await asyncio.to_thread(sync_call)
+    except Exception as e:
+        print(f"[MediaFire] Folder content error: {e}")
+        return []
 
     files = []
-    for item in folder_content['folder_content']:
-        if item['type'] == 'file' and item['filename'].endswith('.pdf'):
-            def sync_file_links():
-                return api.file_get_links(quickkey=item['quickkey'])
-
-            file_links = await asyncio.to_thread(sync_file_links)
-            download_link = None
-            for link in file_links['links']:
-                if link['type'] == 'normal_download':
-                    download_link = link['normal_download']
-                    break
+    for item in folder_content.get('folder_content', []):
+        if item.get('type') == 'file' and item.get('filename', '').endswith('.pdf'):
             try:
-                num = int(item['filename'].replace('.pdf', ''))
-            except:
-                num = 999
-            files.append({
-                'name': item['filename'],
-                'number': num,
-                'download_link': download_link,
-            })
+                def sync_file_links():
+                    return api.file_get_links(quickkey=item['quickkey'])
+
+                file_links = await asyncio.to_thread(sync_file_links)
+                download_link = None
+                for link in file_links.get('links', []):
+                    if link.get('type') == 'normal_download':
+                        download_link = link.get('normal_download')
+                        break
+                
+                try:
+                    num = int(item['filename'].replace('.pdf', ''))
+                except:
+                    num = 999
+                    
+                files.append({
+                    'name': item['filename'],
+                    'number': num,
+                    'download_link': download_link,
+                })
+            except Exception as e:
+                print(f"[MediaFire] Error getting links for {item.get('filename')}: {e}")
             await asyncio.sleep(MEDIAFIRE_API_DELAY)
+    
     files.sort(key=lambda x: x['number'])
     return files
 
@@ -450,6 +464,10 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
         start_page = checkpoint.get('last_page', 0)
         if start_page > 0:
             await throttled_send(chat_id, f"📌 Resuming from page {start_page + 1}")
+
+    if not pdf.get('download_link'):
+        await throttled_send(chat_id, f"❌ ডাউনলোড লিংক পাওয়া যায়নি: {pdf['name']}")
+        return 0, 0, False
 
     pdf_path = await download_pdf_stream(pdf['download_link'])
 
@@ -566,17 +584,20 @@ async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id:
     is_cancelled = False
 
     try:
+        await throttled_send(chat_id, f"🔍 MediaFire থেকে ফাইল তালিকা আনা হচ্ছে...")
+        
         pdf_files = await get_mediafire_files(folder_key)
-        await throttled_send(chat_id, f"📚 {len(pdf_files)}টি PDF পাওয়া গেছে।")
-
+        
         if not pdf_files:
-            await throttled_send(chat_id, "❌ কোনো PDF পাওয়া যায়নি!")
+            await throttled_send(chat_id, "❌ কোনো PDF পাওয়া যায়নি!\n\nসম্ভাব্য কারণ:\n• MediaFire লগইন সমস্যা\n• ফোল্ডার খালি\n• API সংযোগ সমস্যা\n\n/debug দিয়ে স্ট্যাটাস চেক করুন")
             return
+            
+        await throttled_send(chat_id, f"📚 {len(pdf_files)}টি PDF পাওয়া গেছে।")
 
         checkpoint = await load_checkpoint(folder_key)
         processed = set(checkpoint.get('processed', []))
 
-        for pdf in pdf_files:
+        for idx, pdf in enumerate(pdf_files):
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 is_cancelled = True
                 await throttled_send(chat_id, f"⛔ Task cancelled")
@@ -587,8 +608,10 @@ async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id:
                 break
 
             if pdf['name'] in processed:
-                await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf['name']}")
+                await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf['name']} (আগেই প্রসেস করা হয়েছে)")
                 continue
+
+            await throttled_send(chat_id, f"📖 [{idx+1}/{len(pdf_files)}] শুরু: {pdf['name']}")
 
             try:
                 pages_processed, total_pages, cancelled = await process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id)
@@ -606,8 +629,8 @@ async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id:
                 await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf['name']}\n📄 {total_pages} পৃষ্ঠা, 🚀 {pages_processed} পৃষ্ঠা প্রসেসিত")
 
             except Exception as e:
-                error_msg = traceback.format_exc()
-                await throttled_send(chat_id, f"❌ Failed: {pdf['name']}\n{error_msg[:300]}")
+                error_msg = str(e)[:300]
+                await throttled_send(chat_id, f"❌ ব্যর্থ: {pdf['name']}\nত্রুটি: {error_msg}")
                 continue
 
         async with running_tasks_lock:
@@ -641,7 +664,13 @@ async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 MediaFire to HuggingFace Processor\n\n"
         "আমাকে একটি MediaFire ফোল্ডার লিংক দিন।\n"
-        "লিংক পাঠান এখন!",
+        "লিংক পাঠান এখন!\n\n"
+        "কমান্ডসমূহ:\n"
+        "/start - শুরু করুন\n"
+        "/confirm - প্রসেসিং নিশ্চিত করুন\n"
+        "/status - অগ্রগতি দেখুন\n"
+        "/cancel - বন্ধ করুন\n"
+        "/debug - সিস্টেম স্ট্যাটাস দেখুন",
         parse_mode=None
     )
 
@@ -723,6 +752,37 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=None
     )
 
+async def tg_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ডিবাগ ইনফো দেখানোর জন্য"""
+    status = []
+    status.append("🔧 সিস্টেম স্ট্যাটাস:")
+    status.append(f"📧 MediaFire Email: {'✅ সেট' if MEDIAFIRE_EMAIL else '❌ নেই'}")
+    status.append(f"🔑 MediaFire Pass: {'✅ সেট' if MEDIAFIRE_PASSWORD else '❌ নেই'}")
+    status.append(f"🤗 HF Token: {'✅ সেট' if HF_TOKEN else '❌ নেই'}")
+    status.append(f"📁 HF Dataset: {HF_DATASET or '❌ নেই'}")
+    status.append(f"🤖 Bot Token: {'✅ সেট' if TELEGRAM_BOT_TOKEN else '❌ নেই'}")
+    
+    # চলমান টাস্ক
+    async with running_tasks_lock:
+        status.append(f"⚙️ চলমান টাস্ক: {len(running_tasks)}")
+    
+    # MediaFire টেস্ট
+    try:
+        api = await get_mediafire_session()
+        status.append("🔗 MediaFire: ✅ সংযুক্ত")
+    except Exception as e:
+        status.append(f"🔗 MediaFire: ❌ {str(e)[:50]}")
+    
+    # ডিস্ক স্পেস
+    try:
+        total, used, free = shutil.disk_usage("/tmp")
+        free_mb = free // (1024 * 1024)
+        status.append(f"💾 ফ্রি স্পেস: {free_mb} MB")
+    except:
+        status.append("💾 ফ্রি স্পেস: জানা যায়নি")
+    
+    await update.message.reply_text("\n".join(status))
+
 # ============ Telegram Bot Setup ============
 async def setup_bot():
     global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
@@ -743,13 +803,11 @@ async def setup_bot():
             print("⚠️ TELEGRAM_BOT_TOKEN সেট করা নেই।")
             return
 
-        # ✅ CRITICAL: আগের সব সেশন ক্লিয়ার করুন
+        # আগের সব সেশন ক্লিয়ার করুন
         try:
-            from telegram import Bot
             temp_bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            # Webhook ডিলিট এবং সব পেন্ডিং আপডেট বাদ দিন
             await temp_bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(2)  # টেলিগ্রামকে আপডেট হতে সময় দিন
+            await asyncio.sleep(2)
             await temp_bot.close()
             print("✅ আগের সব বট সেশন ক্লিয়ার করা হয়েছে")
         except Exception as e:
@@ -770,6 +828,7 @@ async def setup_bot():
         application.add_handler(CommandHandler('confirm', tg_confirm))
         application.add_handler(CommandHandler('cancel', tg_cancel))
         application.add_handler(CommandHandler('status', tg_status))
+        application.add_handler(CommandHandler('debug', tg_debug))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
 
         # ইনিশিয়ালাইজ এবং স্টার্ট
@@ -778,11 +837,10 @@ async def setup_bot():
 
         # শুধুমাত্র একবার polling শুরু করার ব্যবস্থা
         if not _updater_started:
-            # Polling শুরু (non-blocking) - drop_pending_updates True
             asyncio.create_task(application.updater.start_polling(
                 poll_interval=1.0,
                 timeout=30,
-                drop_pending_updates=True  # পুরনো আপডেট বাদ দিন
+                drop_pending_updates=True
             ))
             _updater_started = True
             print("🤖 Telegram বট চলছে (ক্লিন অ্যাসিঙ্ক মোড)")
@@ -790,6 +848,7 @@ async def setup_bot():
             print("⚠️ Polling আগেই চলছে, আবার শুরু করা হয়নি")
 
         _bot_initialized = True
+
 
 async def shutdown_bot():
     global shutdown_in_progress, application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
@@ -852,6 +911,19 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
+
+@app.get("/test-mediafire")
+async def test_mediafire():
+    try:
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        return {"status": "success", "message": "MediaFire login successful", "email": MEDIAFIRE_EMAIL}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/start_processing")
 async def start_processing(request: ProcessRequest):
