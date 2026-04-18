@@ -44,6 +44,7 @@ MIN_FREE_SPACE_MB = 500
 
 # Upload concurrency
 UPLOAD_CONCURRENCY = 3
+MAX_PENDING_UPLOADS = 5
 
 # Temp file cleanup age (hours)
 TEMP_FILE_MAX_AGE_HOURS = 24
@@ -62,6 +63,11 @@ MEDIAFIRE_API_DELAY = 0.5
 application = None
 mediafire_session = None
 mediafire_session_lock = asyncio.Lock()
+
+# Bot initialization tracking
+_bot_initialized = False
+_bot_init_lock = asyncio.Lock()
+_updater_started = False
 
 # Task management
 running_tasks = {}
@@ -103,18 +109,18 @@ class TokenBucket:
         self.tokens = capacity
         self.last_refill = time.time()
         self.lock = asyncio.Lock()
-    
+
     async def acquire(self, tokens=1):
         async with self.lock:
             now = time.time()
             elapsed = now - self.last_refill
             self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
             self.last_refill = now
-            
+
             if self.tokens >= tokens:
                 self.tokens -= tokens
                 return True
-            
+
             wait_time = (tokens - self.tokens) / self.rate
             self.last_refill = now
             await asyncio.sleep(wait_time)
@@ -226,15 +232,15 @@ async def load_checkpoint(folder_key):
 async def send_telegram_safe(chat_id, message):
     if not TELEGRAM_BOT_TOKEN:
         return False
-    
+
     for retry in range(3):
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {"chat_id": chat_id, "text": message[:4000], "parse_mode": None}
-            
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, json=data, timeout=10)
-            
+
             if response.status_code == 200:
                 return True
             elif response.status_code == 429:
@@ -247,7 +253,7 @@ async def send_telegram_safe(chat_id, message):
         except Exception as e:
             print(f"[Telegram] Send error (retry {retry+1}/3): {e}")
             await asyncio.sleep(2 ** retry)
-    
+
     return False
 
 def is_high_priority_message(message):
@@ -256,21 +262,21 @@ def is_high_priority_message(message):
 
 async def telegram_worker():
     global telegram_dropped_count
-    
+
     while not shutdown_in_progress:
         try:
             item = await asyncio.wait_for(telegram_queue.get(), timeout=1.0)
             if item is None:
                 break
             chat_id, message = item
-            
+
             success = await send_telegram_safe(chat_id, message)
             if not success:
                 print(f"[Telegram] Failed to send message after retries")
-            
+
             telegram_queue.task_done()
             await asyncio.sleep(0.05)
-            
+
         except asyncio.TimeoutError:
             continue
         except Exception as e:
@@ -279,7 +285,7 @@ async def telegram_worker():
 
 async def send_telegram(chat_id, message):
     global telegram_dropped_count
-    
+
     try:
         await asyncio.wait_for(telegram_queue.put((chat_id, message)), timeout=1.0)
     except asyncio.TimeoutError:
@@ -375,7 +381,7 @@ async def download_pdf_stream(url):
 async def upload_to_hf_with_retry(folder_path, file_path, img_name, page_hash):
     if await is_page_already_uploaded(page_hash):
         return True
-    
+
     for retry in range(3):
         try:
             path_in_repo = f"{folder_path}/{img_name}"
@@ -400,20 +406,20 @@ async def upload_to_hf_with_retry(folder_path, file_path, img_name, page_hash):
 
 async def get_mediafire_files(folder_key):
     await mediafire_rate_limiter.acquire()
-    
+
     api = await get_mediafire_session()
-    
+
     def sync_call():
         return api.folder_get_content(folder_key=folder_key)
-    
+
     folder_content = await asyncio.to_thread(sync_call)
-    
+
     files = []
     for item in folder_content['folder_content']:
         if item['type'] == 'file' and item['filename'].endswith('.pdf'):
             def sync_file_links():
                 return api.file_get_links(quickkey=item['quickkey'])
-            
+
             file_links = await asyncio.to_thread(sync_file_links)
             download_link = None
             for link in file_links['links']:
@@ -436,75 +442,75 @@ async def get_mediafire_files(folder_key):
 async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
-    
+
     await throttled_send(chat_id, f"📄 প্রসেসিং: {pdf['name']}\n📁 লোকেশন: {full_hf_path}")
-    
+
     start_page = 0
     if checkpoint.get('current') == pdf['name']:
         start_page = checkpoint.get('last_page', 0)
         if start_page > 0:
             await throttled_send(chat_id, f"📌 Resuming from page {start_page + 1}")
-    
+
     pdf_path = await download_pdf_stream(pdf['download_link'])
-    
+
     doc = None
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         await throttled_send(chat_id, f"🖼️ {total_pages} পৃষ্ঠা কনভার্ট ও আপলোড শুরু...")
-        
+
         BATCH_SIZE = 3
         batch_tasks = []
         pages_processed = 0
         checkpoint_counter = 0
         job_start_time = time.time()
-        
+
         for page_num in range(start_page, total_pages):
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 await throttled_send(chat_id, f"⛔ Task cancelled at page {page_num + 1}")
                 return pages_processed, total_pages, True
-            
+
             if time.time() - job_start_time > MAX_JOB_RUNTIME:
                 await throttled_send(chat_id, f"⏰ Job timeout")
                 return pages_processed, total_pages, False
-            
+
             if is_page_uploaded_checkpoint(checkpoint, pdf['name'], page_num + 1):
                 continue
-                
+
             page = doc.load_page(page_num)
             zoom = 300 / 72
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
-            
+
             img_bytes = pix.tobytes("png")
             page_hash = hashlib.md5(img_bytes).hexdigest()
-            
+
             if await is_page_already_uploaded(page_hash):
                 await throttled_send(chat_id, f"⏭️ Page {page_num + 1} already exists (duplicate), skipping")
                 mark_page_uploaded_checkpoint(checkpoint, pdf['name'], page_num + 1)
                 pix = None
                 page = None
                 continue
-            
+
             img_name = f"page_{page_num+1:04d}.png"
             tmp_path = TEMP_DIR / f"{task_id}_{page_num}_{int(time.time()*1000)}.png"
-            
+
             with open(tmp_path, 'wb') as f:
                 f.write(img_bytes)
-            
+
             pix = None
             page = None
-            
+
             task = asyncio.create_task(upload_to_hf_with_retry(full_hf_path, tmp_path, img_name, page_hash))
             batch_tasks.append((task, page_num + 1, page_hash))
             pages_processed += 1
             checkpoint_counter += 1
-            
+
             while len(batch_tasks) >= MAX_PENDING_UPLOADS:
                 await asyncio.sleep(0.05)
                 if shutdown_in_progress or await is_task_cancelled(task_id):
                     return pages_processed, total_pages, True
-            
+
             if len(batch_tasks) >= BATCH_SIZE:
                 for task, pg_num, pg_hash in batch_tasks:
                     if shutdown_in_progress or await is_task_cancelled(task_id):
@@ -522,9 +528,9 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
                 checkpoint_counter = 0
                 await async_save_checkpoint(folder_key, checkpoint)
                 await throttled_send(chat_id, f"📊 {sub_folder}: {page_num+1}/{total_pages} পৃষ্ঠা প্রসেসিংয়ে")
-                
+
                 gc.collect()
-        
+
         for task, pg_num, pg_hash in batch_tasks:
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 break
@@ -538,12 +544,12 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
             except Exception as e:
                 print(f"Upload failed for page {pg_num}: {e}")
         batch_tasks.clear()
-        
+
         await async_save_checkpoint(folder_key, checkpoint)
         gc.collect()
-        
+
         return pages_processed, total_pages, False
-        
+
     finally:
         if doc:
             doc.close()
@@ -555,55 +561,55 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
 async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id: str):
     clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
     await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু হয়েছে!\n\n📁 ফোল্ডার: {clean_folder_name}")
-    
+
     overall_start_time = time.time()
     is_cancelled = False
-    
+
     try:
         pdf_files = await get_mediafire_files(folder_key)
         await throttled_send(chat_id, f"📚 {len(pdf_files)}টি PDF পাওয়া গেছে।")
-        
+
         if not pdf_files:
             await throttled_send(chat_id, "❌ কোনো PDF পাওয়া যায়নি!")
             return
-        
+
         checkpoint = await load_checkpoint(folder_key)
         processed = set(checkpoint.get('processed', []))
-        
+
         for pdf in pdf_files:
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 is_cancelled = True
                 await throttled_send(chat_id, f"⛔ Task cancelled")
                 break
-            
+
             if time.time() - overall_start_time > MAX_JOB_RUNTIME:
                 await throttled_send(chat_id, f"⏰ Job timeout")
                 break
-            
+
             if pdf['name'] in processed:
                 await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf['name']}")
                 continue
-            
+
             try:
                 pages_processed, total_pages, cancelled = await process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id)
-                
+
                 if cancelled:
                     is_cancelled = True
                     break
-                
+
                 processed.add(pdf['name'])
                 checkpoint['processed'] = list(processed)
                 checkpoint['current'] = None
                 checkpoint['last_page'] = 0
                 await async_save_checkpoint(folder_key, checkpoint)
-                
+
                 await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf['name']}\n📄 {total_pages} পৃষ্ঠা, 🚀 {pages_processed} পৃষ্ঠা প্রসেসিত")
-                
+
             except Exception as e:
                 error_msg = traceback.format_exc()
                 await throttled_send(chat_id, f"❌ Failed: {pdf['name']}\n{error_msg[:300]}")
                 continue
-        
+
         async with running_tasks_lock:
             if task_id in running_tasks:
                 if is_cancelled:
@@ -611,10 +617,10 @@ async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id:
                 else:
                     running_tasks[task_id]["status"] = "completed"
                 running_tasks[task_id]["completed_at"] = time.time()
-        
+
         if not is_cancelled:
             await throttled_send(chat_id, f"🎉 সব প্রসেস সম্পন্ন!\n\n📁 ডেটাসেট: {HF_DATASET}/{clean_folder_name}")
-        
+
     except Exception as e:
         error_msg = traceback.format_exc()
         await throttled_send(chat_id, f"❌ Error:\n{error_msg[:500]}")
@@ -623,7 +629,7 @@ async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id:
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)[:500]
                 running_tasks[task_id]["failed_at"] = time.time()
-    
+
     finally:
         async with running_tasks_lock:
             running_tasks.pop(task_id, None)
@@ -659,9 +665,9 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ আগে একটি MediaFire লিংক দিন।")
         return
     await update.message.reply_text(f"🚀 প্রসেসিং শুরু হচ্ছে...\n📂 ফোল্ডার: {folder_name}", parse_mode=None)
-    
+
     task_id = f"{folder_key}_{update.effective_chat.id}_{int(time.time())}"
-    
+
     async with running_tasks_lock:
         running_tasks[task_id] = {
             "status": "running",
@@ -670,12 +676,12 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "folder_name": folder_name,
             "chat_id": update.effective_chat.id
         }
-    
+
     async with task_controls_lock:
         task_controls[task_id] = {"cancel": False}
-    
+
     asyncio.create_task(process_pdfs(folder_key, folder_name, update.effective_chat.id, task_id))
-    
+
     await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!\nসমাপ্ত হলে আমি জানিয়ে দেব।\n/cancel দিয়ে বন্ধ করতে পারেন।\n/status দিয়ে অগ্রগতি দেখুন।")
 
 async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -683,14 +689,14 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not folder_key:
         await update.message.reply_text("❌ কোনো সক্রিয় প্রসেস নেই।")
         return
-    
+
     task_id_to_cancel = None
     async with running_tasks_lock:
         for tid, task in running_tasks.items():
             if task.get("folder_key") == folder_key and task.get("status") == "running":
                 task_id_to_cancel = tid
                 break
-    
+
     if task_id_to_cancel:
         async with task_controls_lock:
             if task_id_to_cancel in task_controls:
@@ -700,7 +706,7 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ টাস্ক কন্ট্রোল পাওয়া যায়নি।")
     else:
         await update.message.reply_text("❌ কোনো চলমান প্রসেস নেই।")
-    
+
     context.user_data.clear()
 
 async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -708,7 +714,7 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not folder_key:
         await update.message.reply_text("❌ কোনো সক্রিয় প্রসেস নেই। প্রথমে একটি MediaFire লিংক দিন।")
         return
-    
+
     checkpoint = await load_checkpoint(folder_key)
     await update.message.reply_text(
         f"📊 বর্তমান অবস্থা:\n✅ প্রসেস হয়েছে: {len(checkpoint.get('processed', []))}টি PDF\n"
@@ -719,50 +725,83 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
-
-    import sys
-    print("🔧 setup_bot() started", flush=True)
-    sys.stdout.flush()
-    
-    # বাকি কোড...
     global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
-    
-    telegram_worker_task = asyncio.create_task(telegram_worker())
-    checkpoint_writer_task = asyncio.create_task(checkpoint_writer_worker())
-    disk_cleanup_task = asyncio.create_task(disk_cleanup_worker())
-    
-    if not TELEGRAM_BOT_TOKEN:
-        print("⚠️ TELEGRAM_BOT_TOKEN not set.")
-        return
-    
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler('start', tg_start))
-    application.add_handler(CommandHandler('confirm', tg_confirm))
-    application.add_handler(CommandHandler('cancel', tg_cancel))
-    application.add_handler(CommandHandler('status', tg_status))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
-    
-    # ✅ CRITICAL FIX: Initialize and start without run_polling
-    await application.initialize()
-    await application.start()
-    
-    # ✅ Start updater directly (non-blocking)
-    asyncio.create_task(application.updater.start_polling())
-    
-    print("🤖 Telegram bot running (clean async mode)")
+    global _bot_initialized, _updater_started
+
+    async with _bot_init_lock:
+        if _bot_initialized:
+            print("⚠️ বট আগেই চালু আছে, স্কিপ করা হচ্ছে")
+            return
+
+        print("🔧 setup_bot() শুরু হয়েছে", flush=True)
+
+        telegram_worker_task = asyncio.create_task(telegram_worker())
+        checkpoint_writer_task = asyncio.create_task(checkpoint_writer_worker())
+        disk_cleanup_task = asyncio.create_task(disk_cleanup_worker())
+
+        if not TELEGRAM_BOT_TOKEN:
+            print("⚠️ TELEGRAM_BOT_TOKEN সেট করা নেই।")
+            return
+
+        # আগের ইনস্ট্যান্স থাকলে ক্লিনআপ
+        if application is not None:
+            try:
+                await application.shutdown()
+            except:
+                pass
+            application = None
+
+        # নতুন অ্যাপ্লিকেশন তৈরি
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+        application.add_handler(CommandHandler('start', tg_start))
+        application.add_handler(CommandHandler('confirm', tg_confirm))
+        application.add_handler(CommandHandler('cancel', tg_cancel))
+        application.add_handler(CommandHandler('status', tg_status))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
+
+        # ইনিশিয়ালাইজ এবং স্টার্ট
+        await application.initialize()
+        await application.start()
+
+        # শুধুমাত্র একবার polling শুরু করার ব্যবস্থা
+        if not _updater_started:
+            # পুরনো webhook রিমুভ করে polling শুরু
+            try:
+                await application.bot.delete_webhook(drop_pending_updates=True)
+                await asyncio.sleep(1)  # টেলিগ্রামকে আপডেট হতে সময় দিন
+            except Exception as e:
+                print(f"Webhook ডিলিট করতে সমস্যা: {e}")
+
+            # Polling শুরু (non-blocking)
+            asyncio.create_task(application.updater.start_polling(
+                poll_interval=1.0,
+                timeout=30,
+                drop_pending_updates=True  # পুরনো আপডেট বাদ দিন
+            ))
+            _updater_started = True
+            print("🤖 Telegram বট চলছে (ক্লিন অ্যাসিঙ্ক মোড)")
+        else:
+            print("⚠️ Polling আগেই চলছে, আবার শুরু করা হয়নি")
+
+        _bot_initialized = True
+
 
 async def shutdown_bot():
     global shutdown_in_progress, application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
-    
+    global _bot_initialized, _updater_started
+
     shutdown_in_progress = True
-    print("🛑 Shutting down...")
-    
-    # Stop updater first
+    print("🛑 বন্ধ করা হচ্ছে...")
+
+    # Updater বন্ধ করুন
     if application and hasattr(application, 'updater') and application.updater:
-        await application.updater.stop()
-    
-    # Cancel all tasks
+        try:
+            await application.updater.stop()
+        except Exception as e:
+            print(f"Updater বন্ধ করতে সমস্যা: {e}")
+
+    # টাস্কগুলো বাতিল করুন
     if telegram_worker_task:
         await telegram_queue.put(None)
         telegram_worker_task.cancel()
@@ -770,7 +809,7 @@ async def shutdown_bot():
             await telegram_worker_task
         except asyncio.CancelledError:
             pass
-    
+
     if checkpoint_writer_task:
         await checkpoint_write_queue.put(None)
         checkpoint_writer_task.cancel()
@@ -778,21 +817,24 @@ async def shutdown_bot():
             await checkpoint_writer_task
         except asyncio.CancelledError:
             pass
-    
+
     if disk_cleanup_task:
         disk_cleanup_task.cancel()
         try:
             await disk_cleanup_task
         except asyncio.CancelledError:
             pass
-    
+
     if application:
         try:
             await application.stop()
             await application.shutdown()
-            print("🤖 Telegram bot stopped")
+            print("🤖 Telegram বট বন্ধ হয়েছে")
         except Exception as e:
-            print(f"Error stopping bot: {e}")
+            print(f"বট বন্ধ করতে সমস্যা: {e}")
+
+    _bot_initialized = False
+    _updater_started = False
 
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
@@ -811,9 +853,9 @@ async def root():
 async def start_processing(request: ProcessRequest):
     if not request.folder_key or not request.folder_name:
         raise HTTPException(status_code=400, detail="folder_key and folder_name required")
-    
+
     task_id = f"{request.folder_key}_{request.telegram_chat_id}_{int(time.time())}"
-    
+
     async with running_tasks_lock:
         running_tasks[task_id] = {
             "status": "running",
@@ -822,12 +864,12 @@ async def start_processing(request: ProcessRequest):
             "folder_name": request.folder_name,
             "chat_id": request.telegram_chat_id
         }
-    
+
     async with task_controls_lock:
         task_controls[task_id] = {"cancel": False}
-    
+
     asyncio.create_task(process_pdfs(request.folder_key, request.folder_name, request.telegram_chat_id, task_id))
-    
+
     return {"status": "started", "message": "Processing started", "task_id": task_id}
 
 @app.post("/cancel/{task_id}")
