@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (Internet Archive + MediaFire Support)
-BackgroundTasks ব্যবহার করে অ্যাসিঙ্ক্রোনাস প্রসেসিং
+একক ফাইল: FastAPI + Telegram Bot (Threading Support)
 """
 
 import os
@@ -15,10 +14,11 @@ import shutil
 import traceback
 import gc
 import tempfile
+import threading
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -81,9 +81,6 @@ checkpoint_lock = asyncio.Lock()
 disk_cleanup_task = None
 shutdown_in_progress = False
 
-# 🔥 BackgroundTasks এর জন্য গ্লোবাল ভেরিয়েবল
-background_tasks_manager = None
-
 class TokenBucket:
     def __init__(self, rate, capacity):
         self.rate = rate
@@ -114,6 +111,19 @@ class ProcessRequest(BaseModel):
     folder_name: str = None
     telegram_chat_id: int
     pdf_urls: list = None
+
+# ============ Threading Helper ============
+def run_async_in_thread(coro, *args):
+    """একটি আলাদা থ্রেডে async ফাংশন রান করুন"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(coro(*args))
+    except Exception as e:
+        print(f"[Thread] Error: {e}", flush=True)
+        traceback.print_exc()
+    finally:
+        loop.close()
 
 # ============ Disk Space Check ============
 async def check_disk_space():
@@ -230,10 +240,6 @@ async def send_telegram_safe(chat_id, message):
             await asyncio.sleep(3 * (retry + 1))
     return False
 
-def is_high_priority_message(message):
-    high_priority_keywords = ["✅", "🎉", "❌", "🚀", "⛔", "⚠️", "সম্পন্ন", "সমাপ্ত", "error", "failed"]
-    return any(keyword in message for keyword in high_priority_keywords)
-
 async def telegram_worker():
     global telegram_dropped_count
     while not shutdown_in_progress:
@@ -258,43 +264,20 @@ async def send_telegram(chat_id, message):
     try:
         await asyncio.wait_for(telegram_queue.put((chat_id, message)), timeout=1.0)
     except asyncio.TimeoutError:
-        if is_high_priority_message(message):
-            await send_telegram_safe(chat_id, message)
-        else:
-            async with telegram_dropped_lock:
-                telegram_dropped_count += 1
+        await send_telegram_safe(chat_id, message)
     except Exception as e:
         print(f"[Telegram] Queue error: {e}", flush=True)
 
-async def throttled_send(chat_id, message, interval=1.5):
-    async with telegram_lock:
-        now = time.time()
-        last_time = last_telegram_sent.get(chat_id, 0)
-        if now - last_time >= interval:
-            await send_telegram(chat_id, message)
-            last_telegram_sent[chat_id] = now
-            return True
-        else:
-            await asyncio.sleep(interval - (now - last_time))
-            await send_telegram(chat_id, message)
-            last_telegram_sent[chat_id] = time.time()
-            return True
-
 # ============ Internet Archive: আইটেম থেকে PDF লিংক বের করা ============
 async def extract_pdfs_from_archive_item(item_url: str, max_pdfs: int = 30):
-    """Internet Archive আইটেম পেজ থেকে সব PDF লিংক বের করুন"""
     pdf_urls = []
-    
     try:
         item_match = re.search(r'/details/([^/?]+)', item_url)
         if not item_match:
             return pdf_urls
-        
         item_id = item_match.group(1)
         print(f"[Archive] Extracting from item: {item_id}", flush=True)
-        
         metadata_url = f"https://archive.org/metadata/{item_id}"
-        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(metadata_url)
             if response.status_code == 200:
@@ -305,7 +288,6 @@ async def extract_pdfs_from_archive_item(item_url: str, max_pdfs: int = 30):
                     if file_name.lower().endswith('.pdf'):
                         pdf_url = f"https://archive.org/download/{item_id}/{file_name}"
                         pdf_urls.append(pdf_url)
-                
                 if not pdf_urls:
                     for i in range(1, max_pdfs + 1):
                         test_url = f"https://archive.org/download/{item_id}/{i}.pdf"
@@ -316,21 +298,18 @@ async def extract_pdfs_from_archive_item(item_url: str, max_pdfs: int = 30):
                         except:
                             pass
     except Exception as e:
-        print(f"[Archive] Error extracting PDFs: {e}", flush=True)
-        traceback.print_exc()
-    
+        print(f"[Archive] Error: {e}", flush=True)
     return pdf_urls
 
 # ============ PDF ডাউনলোড ও প্রসেসিং ============
 async def download_pdf_stream(url):
-    print(f"[DEBUG] download_pdf_stream: {url[:80]}...", flush=True)
+    print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
     await check_disk_space()
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/pdf,application/octet-stream,*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://archive.org/'
         }
         async with httpx.AsyncClient(timeout=300.0, follow_redirects=True, headers=headers) as client:
@@ -345,7 +324,6 @@ async def download_pdf_stream(url):
         return temp_file.name
     except Exception as e:
         print(f"[DEBUG] Download error: {e}", flush=True)
-        traceback.print_exc()
         temp_file.close()
         try:
             os.unlink(temp_file.name)
@@ -378,7 +356,7 @@ async def upload_to_hf_with_retry(folder_path, file_path, img_name, page_hash):
             if retry == 2:
                 raise
             wait_time = 2 ** retry
-            print(f"Upload retry {retry+1}/3: {e}, waiting {wait_time}s", flush=True)
+            print(f"Upload retry {retry+1}/3: {e}", flush=True)
             await asyncio.sleep(wait_time)
     return False
 
@@ -401,16 +379,14 @@ async def is_task_cancelled(task_id):
 async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
-    await send_telegram_safe(chat_id, f"📄 প্রসেসিং: {pdf['name']}\n📁 লোকেশন: {full_hf_path}")
+    await send_telegram_safe(chat_id, f"📄 প্রসেসিং: {pdf['name']}\n📁 {full_hf_path}")
     
     start_page = 0
     if checkpoint.get('current') == pdf['name']:
         start_page = checkpoint.get('last_page', 0)
-        if start_page > 0:
-            await send_telegram_safe(chat_id, f"📌 Resuming from page {start_page + 1}")
     
     if not pdf.get('download_link'):
-        await send_telegram_safe(chat_id, f"❌ ডাউনলোড লিংক পাওয়া যায়নি: {pdf['name']}")
+        await send_telegram_safe(chat_id, f"❌ ডাউনলোড লিংক নেই: {pdf['name']}")
         return 0, 0, False
     
     await send_telegram_safe(chat_id, f"⬇️ ডাউনলোড হচ্ছে: {pdf['name']}")
@@ -425,21 +401,12 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        await send_telegram_safe(chat_id, f"🖼️ {total_pages} পৃষ্ঠা কনভার্ট ও আপলোড শুরু...")
+        await send_telegram_safe(chat_id, f"🖼️ {total_pages} পৃষ্ঠা আপলোড শুরু...")
         
-        BATCH_SIZE = 3
-        batch_tasks = []
         pages_processed = 0
-        job_start_time = time.time()
-        
         for page_num in range(start_page, total_pages):
             if shutdown_in_progress or await is_task_cancelled(task_id):
-                await send_telegram_safe(chat_id, f"⛔ Task cancelled at page {page_num + 1}")
                 return pages_processed, total_pages, True
-            
-            if time.time() - job_start_time > MAX_JOB_RUNTIME:
-                await send_telegram_safe(chat_id, f"⏰ Job timeout")
-                return pages_processed, total_pages, False
             
             if is_page_uploaded_checkpoint(checkpoint, pdf['name'], page_num + 1):
                 continue
@@ -457,42 +424,28 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
                 continue
             
             img_name = f"page_{page_num+1:04d}.png"
-            tmp_path = TEMP_DIR / f"{task_id}_{page_num}_{int(time.time()*1000)}.png"
+            tmp_path = TEMP_DIR / f"{task_id}_{page_num}.png"
             
             with open(tmp_path, 'wb') as f:
                 f.write(img_bytes)
             
-            task = asyncio.create_task(upload_to_hf_with_retry(full_hf_path, tmp_path, img_name, page_hash))
-            batch_tasks.append((task, page_num + 1))
-            pages_processed += 1
-            
-            while len(batch_tasks) >= MAX_PENDING_UPLOADS:
-                await asyncio.sleep(0.05)
-            
-            if len(batch_tasks) >= BATCH_SIZE:
-                for t, pg_num in batch_tasks:
-                    try:
-                        await asyncio.wait_for(t, timeout=120)
-                        mark_page_uploaded_checkpoint(checkpoint, pdf['name'], pg_num)
-                        checkpoint['current'] = pdf['name']
-                        checkpoint['last_page'] = pg_num
-                    except:
-                        pass
-                batch_tasks.clear()
-                await async_save_checkpoint(folder_key, checkpoint)
-                
-                if page_num % 10 == 0:
-                    await send_telegram_safe(chat_id, f"📊 {sub_folder}: {page_num+1}/{total_pages} পৃষ্ঠা")
-                gc.collect()
-        
-        for t, pg_num in batch_tasks:
             try:
-                await asyncio.wait_for(t, timeout=120)
-                mark_page_uploaded_checkpoint(checkpoint, pdf['name'], pg_num)
+                await upload_to_hf_with_retry(full_hf_path, tmp_path, img_name, page_hash)
+                mark_page_uploaded_checkpoint(checkpoint, pdf['name'], page_num + 1)
+                pages_processed += 1
             except:
                 pass
+            
+            if page_num % 50 == 0:
+                checkpoint['current'] = pdf['name']
+                checkpoint['last_page'] = page_num
+                await async_save_checkpoint(folder_key, checkpoint)
+                await send_telegram_safe(chat_id, f"📊 {page_num+1}/{total_pages} পৃষ্ঠা")
         
+        checkpoint['current'] = None
+        checkpoint['last_page'] = total_pages
         await async_save_checkpoint(folder_key, checkpoint)
+        
         return pages_processed, total_pages, False
     finally:
         if doc:
@@ -506,37 +459,22 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
     print(f"[DEBUG] Folder: {folder_name}", flush=True)
     print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
-    print(f"[DEBUG] First URL: {pdf_urls[0][:80] if pdf_urls else 'None'}", flush=True)
-    print(f"[DEBUG] Chat ID: {chat_id}", flush=True)
-    print(f"[DEBUG] Task ID: {task_id}", flush=True)
     
     try:
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
         await send_telegram_safe(chat_id, f"🚀 প্রসেসিং শুরু!\n📁 {clean_folder_name}\n📚 {len(pdf_urls)}টি PDF")
         
-        overall_start_time = time.time()
-        is_cancelled = False
-        processed = []
-        
         checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
         already_processed = set(checkpoint.get('processed', []))
+        processed = []
         
         for idx, url in enumerate(pdf_urls):
             if shutdown_in_progress or await is_task_cancelled(task_id):
-                is_cancelled = True
-                break
-            if time.time() - overall_start_time > MAX_JOB_RUNTIME:
                 break
             
             name_match = re.search(r'/(\d+)\.pdf', url)
-            if name_match:
-                pdf_number = int(name_match.group(1))
-                pdf_name = f"{pdf_number}.pdf"
-            else:
-                pdf_number = idx + 1
-                pdf_name = url.split('/')[-1]
-                if not pdf_name.endswith('.pdf'):
-                    pdf_name = f"file_{idx+1}.pdf"
+            pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
+            pdf_name = f"{pdf_number}.pdf"
             
             if pdf_name in already_processed:
                 await send_telegram_safe(chat_id, f"⏭️ স্কিপ: {pdf_name}")
@@ -550,7 +488,6 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_
                     pdf, clean_folder_name, f"direct_{clean_folder_name}", chat_id, checkpoint, task_id
                 )
                 if cancelled:
-                    is_cancelled = True
                     break
                 
                 processed.append(pdf_name)
@@ -558,47 +495,29 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_
                 await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
                 await send_telegram_safe(chat_id, f"✅ সম্পন্ন: {pdf_name} ({total_pages} পৃষ্ঠা)")
             except Exception as e:
-                print(f"[DEBUG] Error processing {pdf_name}: {e}", flush=True)
-                traceback.print_exc()
-                await send_telegram_safe(chat_id, f"❌ ব্যর্থ: {pdf_name}\n{str(e)[:200]}")
+                await send_telegram_safe(chat_id, f"❌ ব্যর্থ: {pdf_name}")
         
-        if not is_cancelled and processed:
+        if processed:
             await send_telegram_safe(chat_id, f"🎉 সব সম্পন্ন!\n📁 {HF_DATASET}/{clean_folder_name}\n✅ {len(processed)}টি PDF")
         
         async with running_tasks_lock:
             if task_id in running_tasks:
-                running_tasks[task_id]["status"] = "completed" if not is_cancelled else "cancelled"
+                running_tasks[task_id]["status"] = "completed"
     except Exception as e:
-        print(f"[DEBUG] FATAL ERROR in process_pdf_urls: {e}", flush=True)
+        print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
-        await send_telegram_safe(chat_id, f"❌ সিস্টেম ত্রুটি: {str(e)[:300]}")
+        await send_telegram_safe(chat_id, f"❌ ত্রুটি: {str(e)[:200]}")
 
 # ============ টেলিগ্রাম বট হ্যান্ডলার ============
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 PDF to HuggingFace Processor\n\n"
-        "সাপোর্টেড লিংক:\n"
-        "✅ Internet Archive আইটেম: https://archive.org/details/...\n"
-        "✅ Internet Archive PDF: https://archive.org/download/.../1.pdf\n"
-        "✅ MediaFire PDF: https://www.mediafire.com/file/.../1.pdf/file\n\n"
-        "ব্যবহার:\n"
         "প্রথম লাইনে বইয়ের নাম\n"
         "তারপর লিংক\n"
-        "তারপর /confirm\n\n"
-        "কমান্ড:\n"
-        "/start, /bookname, /confirm, /status, /cancel, /debug"
+        "তারপর /confirm"
     )
 
-async def tg_bookname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ ব্যবহার: /bookname বইয়ের_নাম")
-        return
-    book_name = ' '.join(context.args)
-    context.user_data['folder_name'] = book_name
-    await update.message.reply_text(f"✅ বই: {book_name}")
-
 async def tg_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[DEBUG] tg_handle_link called", flush=True)
     text = update.message.text.strip()
     lines = text.split('\n')
     
@@ -610,7 +529,6 @@ async def tg_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         line = line.strip()
         if not line:
             continue
-        
         if 'archive.org/details/' in line:
             archive_item = line
         elif ('archive.org/download/' in line or '/file/' in line) and '.pdf' in line:
@@ -619,25 +537,15 @@ async def tg_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             book_name = line
     
     if archive_item and not pdf_urls:
-        await update.message.reply_text("🔍 Internet Archive থেকে PDF লিংক বের করা হচ্ছে...")
+        await update.message.reply_text("🔍 PDF লিংক বের করা হচ্ছে...")
         pdf_urls = await extract_pdfs_from_archive_item(archive_item)
-        
         if pdf_urls:
-            def extract_number(url):
-                match = re.search(r'/(\d+)\.pdf', url)
-                return int(match.group(1)) if match else 999
-            pdf_urls.sort(key=extract_number)
-            await update.message.reply_text(f"✅ {len(pdf_urls)}টি PDF লিংক পাওয়া গেছে!")
-        else:
-            await update.message.reply_text("❌ কোনো PDF লিংক বের করা যায়নি!")
-            return
+            pdf_urls.sort(key=lambda x: int(re.search(r'/(\d+)\.pdf', x).group(1)) if re.search(r'/(\d+)\.pdf', x) else 999)
+            await update.message.reply_text(f"✅ {len(pdf_urls)}টি PDF পাওয়া গেছে!")
     
     if pdf_urls:
         context.user_data['pdf_urls'] = pdf_urls
-        if book_name:
-            context.user_data['folder_name'] = book_name
-        elif not context.user_data.get('folder_name'):
-            context.user_data['folder_name'] = f"tafsir_{int(time.time())}"
+        context.user_data['folder_name'] = book_name or f"tafsir_{int(time.time())}"
         
         preview = "\n".join(pdf_urls[:5])
         if len(pdf_urls) > 5:
@@ -645,25 +553,17 @@ async def tg_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"📚 বই: {context.user_data['folder_name']}\n"
-            f"📄 {len(pdf_urls)}টি PDF\n\n"
-            f"লিংকসমূহ:\n{preview}\n\n"
-            f"✅ /confirm"
+            f"📄 {len(pdf_urls)}টি PDF\n\n{preview}\n\n✅ /confirm"
         )
         return
     
     await update.message.reply_text("❌ কোনো PDF লিংক পাওয়া যায়নি!")
 
 async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global background_tasks_manager
-    
     print(f"[DEBUG] tg_confirm called", flush=True)
-    print(f"[DEBUG] user_data keys: {list(context.user_data.keys())}", flush=True)
     
     pdf_urls = context.user_data.get('pdf_urls')
     folder_name = context.user_data.get('folder_name')
-    
-    print(f"[DEBUG] pdf_urls count: {len(pdf_urls) if pdf_urls else 0}", flush=True)
-    print(f"[DEBUG] folder_name: {folder_name}", flush=True)
     
     if pdf_urls:
         if not folder_name:
@@ -677,20 +577,33 @@ async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
         
-        # 🔥 BackgroundTasks ব্যবহার করে ব্যাকগ্রাউন্ডে প্রসেসিং শুরু করুন
-        if background_tasks_manager:
-            background_tasks_manager.add_task(process_pdf_urls, pdf_urls, folder_name, update.effective_chat.id, task_id)
-            print(f"[DEBUG] Task added to BackgroundTasks", flush=True)
-        else:
-            # Fallback: সরাসরি asyncio.create_task
-            asyncio.create_task(process_pdf_urls(pdf_urls, folder_name, update.effective_chat.id, task_id))
-            print(f"[DEBUG] Task started with asyncio.create_task", flush=True)
+        # 🔥 আলাদা থ্রেডে প্রসেসিং শুরু করুন
+        thread = threading.Thread(
+            target=run_async_in_thread,
+            args=(process_pdf_urls, pdf_urls, folder_name, update.effective_chat.id, task_id),
+            daemon=True
+        )
+        thread.start()
+        print(f"[DEBUG] Thread started for task {task_id}", flush=True)
         
         await update.message.reply_text("✅ শুরু হয়েছে! /status দেখুন")
         context.user_data['pdf_urls'] = None
         return
     
     await update.message.reply_text("❌ আগে PDF লিংক দিন")
+
+async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    folder_name = context.user_data.get('folder_name', 'tafsir')
+    clean_name = folder_name.replace(' ', '_')
+    checkpoint = await load_checkpoint(f"direct_{clean_name}")
+    
+    processed = checkpoint.get('processed', [])
+    current = checkpoint.get('current', 'কিছু না')
+    last_page = checkpoint.get('last_page', 0)
+    
+    await update.message.reply_text(
+        f"📊 অবস্থা:\n✅ প্রসেস: {len(processed)}টি PDF\n🔄 চলমান: {current}\n📄 শেষ পৃষ্ঠা: {last_page}"
+    )
 
 async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_to_cancel = None
@@ -707,38 +620,6 @@ async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ বন্ধ করা হচ্ছে...")
     else:
         await update.message.reply_text("❌ কোনো চলমান প্রসেস নেই")
-
-async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    folder_name = context.user_data.get('folder_name', 'tafsir')
-    clean_name = folder_name.replace(' ', '_')
-    checkpoint = await load_checkpoint(f"direct_{clean_name}")
-    
-    processed = checkpoint.get('processed', [])
-    current = checkpoint.get('current', 'কিছু না')
-    last_page = checkpoint.get('last_page', 0)
-    
-    await update.message.reply_text(
-        f"📊 অবস্থা:\n"
-        f"✅ প্রসেস: {len(processed)}টি PDF\n"
-        f"🔄 চলমান: {current}\n"
-        f"📄 শেষ পৃষ্ঠা: {last_page}"
-    )
-
-async def tg_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = [
-        "🔧 স্ট্যাটাস:",
-        f"📧 MediaFire: {'✅' if MEDIAFIRE_EMAIL else '❌'}",
-        f"🤗 HF Token: {'✅' if HF_TOKEN else '❌'}",
-        f"📁 HF Dataset: {HF_DATASET or '❌'}",
-        f"🤖 Bot Token: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}",
-        f"⚙️ চলমান টাস্ক: {len(running_tasks)}"
-    ]
-    try:
-        total, used, free = shutil.disk_usage("/tmp")
-        status.append(f"💾 ফ্রি: {free // (1024*1024)} MB")
-    except:
-        pass
-    await update.message.reply_text("\n".join(status))
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
@@ -769,11 +650,9 @@ async def setup_bot():
         
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         application.add_handler(CommandHandler('start', tg_start))
-        application.add_handler(CommandHandler('bookname', tg_bookname))
         application.add_handler(CommandHandler('confirm', tg_confirm))
         application.add_handler(CommandHandler('cancel', tg_cancel))
         application.add_handler(CommandHandler('status', tg_status))
-        application.add_handler(CommandHandler('debug', tg_debug))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
         
         await application.initialize()
@@ -797,9 +676,6 @@ async def shutdown_bot():
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global background_tasks_manager
-    # BackgroundTasks ইনস্ট্যান্স তৈরি করুন
-    background_tasks_manager = BackgroundTasks()
     await setup_bot()
     yield
     await shutdown_bot()
@@ -808,39 +684,12 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Tafsir Image Processor"}
+    return {"status": "ok"}
 
 @app.get("/tasks")
 async def get_tasks():
     async with running_tasks_lock:
         return {k: v for k, v in running_tasks.items()}
-
-@app.get("/test-download")
-async def test_download():
-    """PDF ডাউনলোড টেস্ট করুন"""
-    try:
-        url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.head(url)
-        return {
-            "status": "success",
-            "url": url,
-            "response_code": response.status_code,
-            "headers": dict(response.headers)
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.get("/test-archive")
-async def test_archive():
-    """Internet Archive সংযোগ টেস্ট"""
-    try:
-        url = "https://archive.org"
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(url)
-        return {"status": "success", "archive.org": response.status_code}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 # ============ মেইন ============
 if __name__ == "__main__":
