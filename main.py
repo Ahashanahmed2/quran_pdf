@@ -418,23 +418,39 @@ async def get_mediafire_files(folder_key):
 
     try:
         folder_content = await asyncio.to_thread(sync_call)
+        print(f"[DEBUG] Folder content type: {type(folder_content)}")
     except Exception as e:
         print(f"[MediaFire] Folder content error: {e}")
         return []
 
+    # রেসপন্স টাইপ চেক করে হ্যান্ডেল করুন
+    if isinstance(folder_content, dict):
+        items = folder_content.get('folder_content', [])
+    elif isinstance(folder_content, str):
+        import json
+        try:
+            folder_content = json.loads(folder_content)
+            items = folder_content.get('folder_content', [])
+        except:
+            items = []
+    else:
+        items = []
+
     files = []
-    for item in folder_content.get('folder_content', []):
-        if item.get('type') == 'file' and item.get('filename', '').endswith('.pdf'):
+    for item in items:
+        if isinstance(item, dict) and item.get('type') == 'file' and item.get('filename', '').endswith('.pdf'):
             try:
                 def sync_file_links():
                     return api.file_get_links(quickkey=item['quickkey'])
 
                 file_links = await asyncio.to_thread(sync_file_links)
                 download_link = None
-                for link in file_links.get('links', []):
-                    if link.get('type') == 'normal_download':
-                        download_link = link.get('normal_download')
-                        break
+                
+                if isinstance(file_links, dict):
+                    for link in file_links.get('links', []):
+                        if link.get('type') == 'normal_download':
+                            download_link = link.get('normal_download')
+                            break
                 
                 try:
                     num = int(item['filename'].replace('.pdf', ''))
@@ -929,23 +945,48 @@ async def test_folder(folder_key: str):
         # ফোল্ডার কন্টেন্ট আনুন
         content = api.folder_get_content(folder_key=folder_key)
         
+        # ডিবাগ: রেসপন্স টাইপ দেখুন
+        print(f"[DEBUG] Content type: {type(content)}")
+        print(f"[DEBUG] Content: {content}")
+        
         files = []
-        for item in content.get('folder_content', []):
-            files.append({
-                'name': item.get('filename'),
-                'type': item.get('type'),
-                'quickkey': item.get('quickkey')
-            })
+        
+        # রেসপন্স টাইপ চেক করুন
+        if isinstance(content, dict):
+            folder_content = content.get('folder_content', [])
+        elif isinstance(content, str):
+            # যদি স্ট্রিং হয়, JSON পার্স করার চেষ্টা করুন
+            import json
+            try:
+                content = json.loads(content)
+                folder_content = content.get('folder_content', [])
+            except:
+                folder_content = []
+        else:
+            folder_content = []
+        
+        for item in folder_content:
+            if isinstance(item, dict):
+                files.append({
+                    'name': item.get('filename', 'Unknown'),
+                    'type': item.get('type', 'Unknown'),
+                    'quickkey': item.get('quickkey', 'Unknown')
+                })
         
         return {
             "status": "success",
             "folder_key": folder_key,
             "total_items": len(files),
-            "files": files[:10]  # প্রথম ১০টি দেখান
+            "files": files[:10],
+            "raw_response_type": str(type(content))
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+        import traceback
+        return {
+            "status": "error", 
+            "message": str(e),
+            "traceback": traceback.format_exc()[:500]
+        }
 @app.get("/test-mediafire")
 async def test_mediafire():
     try:
