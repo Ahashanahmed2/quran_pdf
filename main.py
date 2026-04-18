@@ -912,6 +912,40 @@ app = FastAPI(lifespan=lifespan)
 async def root():
     return {"status": "ok", "message": "Tafsir Image Processor is running"}
 
+# FastAPI অ্যাপ সেকশনে যোগ করুন (lifespan এর পরে)
+
+@app.get("/test-folder/{folder_key}")
+async def test_folder(folder_key: str):
+    """MediaFire ফোল্ডার কন্টেন্ট টেস্ট"""
+    try:
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        api.session = session
+        
+        # ফোল্ডার কন্টেন্ট আনুন
+        content = api.folder_get_content(folder_key=folder_key)
+        
+        files = []
+        for item in content.get('folder_content', []):
+            files.append({
+                'name': item.get('filename'),
+                'type': item.get('type'),
+                'quickkey': item.get('quickkey')
+            })
+        
+        return {
+            "status": "success",
+            "folder_key": folder_key,
+            "total_items": len(files),
+            "files": files[:10]  # প্রথম ১০টি দেখান
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/test-mediafire")
 async def test_mediafire():
     try:
