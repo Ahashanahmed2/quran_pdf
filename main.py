@@ -789,6 +789,28 @@ async def get_tasks():
     async with running_tasks_lock:
         return {k: v for k, v in running_tasks.items()}
 
+@app.get("/test-connection")
+async def test_connection():
+    """Internet Archive সংযোগ টেস্ট"""
+    try:
+        import socket
+        import requests
+        
+        # DNS টেস্ট
+        ip = socket.gethostbyname("archive.org")
+        
+        # HTTP টেস্ট
+        response = requests.get("https://archive.org", timeout=10)
+        
+        return {
+            "status": "success",
+            "archive.org_ip": ip,
+            "http_status": response.status_code
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+        
+
 @app.post("/cancel/{task_id}")
 async def cancel_task(task_id: str):
     async with task_controls_lock:
