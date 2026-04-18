@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-একক ফাইল: FastAPI + Telegram Bot (Production Ready - Fixed Event Loop Conflict)
+একক ফাইল: FastAPI + Telegram Bot (Internet Archive + MediaFire Support)
+উভয় পদ্ধতি সমর্থন করে:
+1. আইটেম লিংক: https://archive.org/details/ITEM_ID
+2. সরাসরি PDF লিংক: https://archive.org/download/ITEM_ID/1.pdf
 """
 
 import os
@@ -271,65 +274,57 @@ async def throttled_send(chat_id, message, interval=2):
             return True
         return False
 
-# ============ MediaFire Session Management ============
-async def get_mediafire_session():
-    global mediafire_session
-    async with mediafire_session_lock:
-        if mediafire_session is None:
-            try:
-                api = MediaFireApi()
-                session = api.user_get_session_token(
-                    email=MEDIAFIRE_EMAIL, 
-                    password=MEDIAFIRE_PASSWORD, 
-                    app_id='42511'
-                )
-                api.session = session
-                mediafire_session = api
-                print("✅ MediaFire session created")
-            except Exception as e:
-                print(f"⚠️ Failed to create MediaFire session: {e}")
-                raise
-        return mediafire_session
+# ============ Internet Archive: আইটেম থেকে PDF লিংক বের করা ============
+async def extract_pdfs_from_archive_item(item_url: str, max_pdfs: int = 30):
+    """Internet Archive আইটেম পেজ থেকে সব PDF লিংক বের করুন"""
+    pdf_urls = []
+    
+    try:
+        # আইটেম ID বের করুন
+        item_match = re.search(r'/details/([^/?]+)', item_url)
+        if not item_match:
+            return pdf_urls
+        
+        item_id = item_match.group(1)
+        
+        # Internet Archive metadata API ব্যবহার করুন
+        metadata_url = f"https://archive.org/metadata/{item_id}"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(metadata_url)
+            if response.status_code == 200:
+                data = response.json()
+                
+                # ফাইল লিস্ট থেকে PDF খুঁজুন
+                files = data.get('files', [])
+                for file_info in files:
+                    file_name = file_info.get('name', '')
+                    if file_name.lower().endswith('.pdf'):
+                        pdf_url = f"https://archive.org/download/{item_id}/{file_name}"
+                        pdf_urls.append(pdf_url)
+                
+                # যদি মেটাডেটা API কাজ না করে, তাহলে নাম্বার অনুযায়ী ট্রাই করুন
+                if not pdf_urls:
+                    for i in range(1, max_pdfs + 1):
+                        test_url = f"https://archive.org/download/{item_id}/{i}.pdf"
+                        try:
+                            test_response = await client.head(test_url)
+                            if test_response.status_code == 200:
+                                pdf_urls.append(test_url)
+                        except:
+                            pass
+    except Exception as e:
+        print(f"[Archive] Error extracting PDFs: {e}")
+    
+    return pdf_urls
 
-# ============ PDF প্রসেসিং ফাংশন ============
-def extract_from_mediafire_url(url):
-    file_match = re.search(r'/file/([a-zA-Z0-9]+)/(.+?\.pdf)', url)
-    if file_match:
-        quick_key = file_match.group(1)
-        file_name = file_match.group(2).replace('%20', ' ').replace('+', ' ')
-        return quick_key, file_name
-    key_match = re.search(r'/folder/([a-zA-Z0-9]+)', url)
-    if not key_match:
-        return None, None
-    folder_key = key_match.group(1)
-    name_match = re.search(r'/folder/[a-zA-Z0-9]+/(.+?)$', url)
-    if name_match:
-        folder_name = name_match.group(1).replace('+', ' ').replace('%20', ' ')
-    else:
-        folder_name = folder_key
-    return folder_key, folder_name
-
-def is_page_uploaded_checkpoint(checkpoint, pdf_name, page_num):
-    last_page_map = checkpoint.get('last_page_map', {})
-    last_page = last_page_map.get(pdf_name, 0)
-    return page_num <= last_page
-
-def mark_page_uploaded_checkpoint(checkpoint, pdf_name, page_num):
-    if 'last_page_map' not in checkpoint:
-        checkpoint['last_page_map'] = {}
-    current = checkpoint['last_page_map'].get(pdf_name, 0)
-    if page_num > current:
-        checkpoint['last_page_map'][pdf_name] = page_num
-
-async def is_task_cancelled(task_id):
-    async with task_controls_lock:
-        return task_controls.get(task_id, {}).get("cancel", False)
-
+# ============ PDF ডাউনলোড ও প্রসেসিং ============
 async def download_pdf_stream(url):
     await check_disk_space()
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     try:
-        async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as client:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        async with httpx.AsyncClient(timeout=180.0, follow_redirects=True, headers=headers) as client:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes(chunk_size=8192):
@@ -373,152 +368,112 @@ async def upload_to_hf_with_retry(folder_path, file_path, img_name, page_hash):
             await asyncio.sleep(wait_time)
     return False
 
-async def get_mediafire_files(folder_key):
-    await mediafire_rate_limiter.acquire()
-    try:
-        api = await get_mediafire_session()
-    except Exception as e:
-        print(f"[MediaFire] Session error: {e}")
-        return []
-    def sync_call():
-        return api.folder_get_content(folder_key=folder_key)
-    try:
-        folder_content = await asyncio.to_thread(sync_call)
-    except Exception as e:
-        print(f"[MediaFire] Folder content error: {e}")
-        return []
-    if isinstance(folder_content, str):
-        try:
-            import json
-            folder_content = json.loads(folder_content)
-        except:
-            pass
-    if isinstance(folder_content, dict):
-        if 'response' in folder_content:
-            items = folder_content.get('response', {}).get('folder_content', [])
-        else:
-            items = folder_content.get('folder_content', [])
-    else:
-        items = []
-    files = []
-    for item in items:
-        if isinstance(item, dict) and item.get('type') == 'file' and item.get('filename', '').endswith('.pdf'):
-            try:
-                def sync_file_links():
-                    return api.file_get_links(quickkey=item['quickkey'])
-                file_links = await asyncio.to_thread(sync_file_links)
-                download_link = None
-                if isinstance(file_links, dict):
-                    for link in file_links.get('links', []):
-                        if link.get('type') == 'normal_download':
-                            download_link = link.get('normal_download')
-                            break
-                try:
-                    num = int(item['filename'].replace('.pdf', ''))
-                except:
-                    num = 999
-                files.append({
-                    'name': item['filename'],
-                    'number': num,
-                    'download_link': download_link,
-                })
-            except Exception as e:
-                print(f"[MediaFire] Error getting links for {item.get('filename')}: {e}")
-            await asyncio.sleep(MEDIAFIRE_API_DELAY)
-    files.sort(key=lambda x: x['number'])
-    return files
+def is_page_uploaded_checkpoint(checkpoint, pdf_name, page_num):
+    last_page_map = checkpoint.get('last_page_map', {})
+    last_page = last_page_map.get(pdf_name, 0)
+    return page_num <= last_page
+
+def mark_page_uploaded_checkpoint(checkpoint, pdf_name, page_num):
+    if 'last_page_map' not in checkpoint:
+        checkpoint['last_page_map'] = {}
+    current = checkpoint['last_page_map'].get(pdf_name, 0)
+    if page_num > current:
+        checkpoint['last_page_map'][pdf_name] = page_num
+
+async def is_task_cancelled(task_id):
+    async with task_controls_lock:
+        return task_controls.get(task_id, {}).get("cancel", False)
 
 async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
     await throttled_send(chat_id, f"📄 প্রসেসিং: {pdf['name']}\n📁 লোকেশন: {full_hf_path}")
+    
     start_page = 0
     if checkpoint.get('current') == pdf['name']:
         start_page = checkpoint.get('last_page', 0)
         if start_page > 0:
             await throttled_send(chat_id, f"📌 Resuming from page {start_page + 1}")
+    
     if not pdf.get('download_link'):
         await throttled_send(chat_id, f"❌ ডাউনলোড লিংক পাওয়া যায়নি: {pdf['name']}")
         return 0, 0, False
+    
+    await throttled_send(chat_id, f"⬇️ ডাউনলোড হচ্ছে: {pdf['name']}")
     pdf_path = await download_pdf_stream(pdf['download_link'])
+    
     doc = None
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         await throttled_send(chat_id, f"🖼️ {total_pages} পৃষ্ঠা কনভার্ট ও আপলোড শুরু...")
+        
         BATCH_SIZE = 3
         batch_tasks = []
         pages_processed = 0
-        checkpoint_counter = 0
         job_start_time = time.time()
+        
         for page_num in range(start_page, total_pages):
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 await throttled_send(chat_id, f"⛔ Task cancelled at page {page_num + 1}")
                 return pages_processed, total_pages, True
+            
             if time.time() - job_start_time > MAX_JOB_RUNTIME:
                 await throttled_send(chat_id, f"⏰ Job timeout")
                 return pages_processed, total_pages, False
+            
             if is_page_uploaded_checkpoint(checkpoint, pdf['name'], page_num + 1):
                 continue
+            
             page = doc.load_page(page_num)
             zoom = 300 / 72
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
+            
             img_bytes = pix.tobytes("png")
             page_hash = hashlib.md5(img_bytes).hexdigest()
+            
             if await is_page_already_uploaded(page_hash):
-                await throttled_send(chat_id, f"⏭️ Page {page_num + 1} already exists (duplicate), skipping")
                 mark_page_uploaded_checkpoint(checkpoint, pdf['name'], page_num + 1)
-                pix = None
-                page = None
                 continue
+            
             img_name = f"page_{page_num+1:04d}.png"
             tmp_path = TEMP_DIR / f"{task_id}_{page_num}_{int(time.time()*1000)}.png"
+            
             with open(tmp_path, 'wb') as f:
                 f.write(img_bytes)
-            pix = None
-            page = None
+            
             task = asyncio.create_task(upload_to_hf_with_retry(full_hf_path, tmp_path, img_name, page_hash))
-            batch_tasks.append((task, page_num + 1, page_hash))
+            batch_tasks.append((task, page_num + 1))
             pages_processed += 1
-            checkpoint_counter += 1
+            
             while len(batch_tasks) >= MAX_PENDING_UPLOADS:
                 await asyncio.sleep(0.05)
-                if shutdown_in_progress or await is_task_cancelled(task_id):
-                    return pages_processed, total_pages, True
+            
             if len(batch_tasks) >= BATCH_SIZE:
-                for task, pg_num, pg_hash in batch_tasks:
-                    if shutdown_in_progress or await is_task_cancelled(task_id):
-                        break
+                for t, pg_num in batch_tasks:
                     try:
-                        await asyncio.wait_for(task, timeout=120)
+                        await asyncio.wait_for(t, timeout=120)
                         mark_page_uploaded_checkpoint(checkpoint, pdf['name'], pg_num)
                         checkpoint['current'] = pdf['name']
                         checkpoint['last_page'] = pg_num
-                    except asyncio.TimeoutError:
-                        await throttled_send(chat_id, f"⚠️ Page {pg_num} upload timeout")
-                    except Exception as e:
-                        print(f"Upload failed for page {pg_num}: {e}")
+                    except:
+                        pass
                 batch_tasks.clear()
-                checkpoint_counter = 0
                 await async_save_checkpoint(folder_key, checkpoint)
-                await throttled_send(chat_id, f"📊 {sub_folder}: {page_num+1}/{total_pages} পৃষ্ঠা প্রসেসিংয়ে")
+                
+                if page_num % 10 == 0:
+                    await throttled_send(chat_id, f"📊 {sub_folder}: {page_num+1}/{total_pages} পৃষ্ঠা")
                 gc.collect()
-        for task, pg_num, pg_hash in batch_tasks:
-            if shutdown_in_progress or await is_task_cancelled(task_id):
-                break
+        
+        for t, pg_num in batch_tasks:
             try:
-                await asyncio.wait_for(task, timeout=120)
+                await asyncio.wait_for(t, timeout=120)
                 mark_page_uploaded_checkpoint(checkpoint, pdf['name'], pg_num)
-                checkpoint['current'] = pdf['name']
-                checkpoint['last_page'] = pg_num
-            except asyncio.TimeoutError:
-                await throttled_send(chat_id, f"⚠️ Page {pg_num} upload timeout")
-            except Exception as e:
-                print(f"Upload failed for page {pg_num}: {e}")
-        batch_tasks.clear()
+            except:
+                pass
+        
         await async_save_checkpoint(folder_key, checkpoint)
-        gc.collect()
         return pages_processed, total_pages, False
     finally:
         if doc:
@@ -530,42 +485,39 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkp
 
 async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_id: str):
     clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
-    await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু হয়েছে!\n\n📁 ডেটাসেট ফোল্ডার: {clean_folder_name}")
-    await throttled_send(chat_id, f"📚 {len(pdf_urls)}টি PDF পাওয়া গেছে।")
+    await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু!\n📁 {clean_folder_name}\n📚 {len(pdf_urls)}টি PDF")
+    
     overall_start_time = time.time()
     is_cancelled = False
     processed = []
+    
     checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
     already_processed = set(checkpoint.get('processed', []))
+    
     for idx, url in enumerate(pdf_urls):
         if shutdown_in_progress or await is_task_cancelled(task_id):
             is_cancelled = True
-            await throttled_send(chat_id, f"⛔ Task cancelled")
             break
         if time.time() - overall_start_time > MAX_JOB_RUNTIME:
-            await throttled_send(chat_id, f"⏰ Job timeout")
             break
+        
         name_match = re.search(r'/(\d+)\.pdf', url)
         if name_match:
             pdf_number = int(name_match.group(1))
             pdf_name = f"{pdf_number}.pdf"
         else:
             pdf_number = idx + 1
-            pdf_name = f"file_{idx+1}.pdf"
+            pdf_name = url.split('/')[-1]
+            if not pdf_name.endswith('.pdf'):
+                pdf_name = f"file_{idx+1}.pdf"
+        
         if pdf_name in already_processed:
-            await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf_name} (আগেই প্রসেস করা হয়েছে)")
+            await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf_name}")
             continue
-        quick_key = re.search(r'/file/([a-zA-Z0-9]+)/', url)
-        if quick_key:
-            download_url = f"https://download.mediafire.com/file/{quick_key.group(1)}/{pdf_name}"
-        else:
-            download_url = url
-        pdf = {
-            'name': pdf_name,
-            'number': pdf_number,
-            'download_link': download_url
-        }
-        await throttled_send(chat_id, f"📖 [{idx+1}/{len(pdf_urls)}] শুরু: {pdf_name}")
+        
+        pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
+        await throttled_send(chat_id, f"📖 [{idx+1}/{len(pdf_urls)}] {pdf_name}")
+        
         try:
             pages_processed, total_pages, cancelled = await process_single_pdf(
                 pdf, clean_folder_name, f"direct_{clean_folder_name}", chat_id, checkpoint, task_id
@@ -573,110 +525,35 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_
             if cancelled:
                 is_cancelled = True
                 break
+            
             processed.append(pdf_name)
             checkpoint['processed'] = list(set(checkpoint.get('processed', []) + [pdf_name]))
-            checkpoint['current'] = None
-            checkpoint['last_page'] = 0
             await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
-            await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf_name}\n📄 {total_pages} পৃষ্ঠা, 🚀 {pages_processed} আপলোড")
+            await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf_name} ({total_pages} পৃষ্ঠা)")
         except Exception as e:
-            error_msg = str(e)[:300]
-            await throttled_send(chat_id, f"❌ ব্যর্থ: {pdf_name}\nত্রুটি: {error_msg}")
-            continue
+            await throttled_send(chat_id, f"❌ ব্যর্থ: {pdf_name}\n{str(e)[:200]}")
+    
+    if not is_cancelled and processed:
+        await throttled_send(chat_id, f"🎉 সব সম্পন্ন!\n📁 {HF_DATASET}/{clean_folder_name}\n✅ {len(processed)}টি PDF")
+    
     async with running_tasks_lock:
         if task_id in running_tasks:
-            if is_cancelled:
-                running_tasks[task_id]["status"] = "cancelled"
-            else:
-                running_tasks[task_id]["status"] = "completed"
-            running_tasks[task_id]["completed_at"] = time.time()
-            running_tasks[task_id]["processed"] = processed
-    if not is_cancelled:
-        await throttled_send(chat_id, 
-            f"🎉 সব প্রসেস সম্পন্ন!\n\n"
-            f"📁 ডেটাসেট: {HF_DATASET}/{clean_folder_name}\n"
-            f"✅ প্রসেস হয়েছে: {len(processed)}টি PDF")
-
-async def process_pdfs(folder_key: str, folder_name: str, chat_id: int, task_id: str):
-    clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
-    await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু হয়েছে!\n\n📁 ফোল্ডার: {clean_folder_name}")
-    overall_start_time = time.time()
-    is_cancelled = False
-    try:
-        await throttled_send(chat_id, f"🔍 MediaFire থেকে ফাইল তালিকা আনা হচ্ছে...")
-        pdf_files = await get_mediafire_files(folder_key)
-        if not pdf_files:
-            await throttled_send(chat_id, "❌ কোনো PDF পাওয়া যায়নি!")
-            return
-        await throttled_send(chat_id, f"📚 {len(pdf_files)}টি PDF পাওয়া গেছে।")
-        checkpoint = await load_checkpoint(folder_key)
-        processed = set(checkpoint.get('processed', []))
-        for idx, pdf in enumerate(pdf_files):
-            if shutdown_in_progress or await is_task_cancelled(task_id):
-                is_cancelled = True
-                await throttled_send(chat_id, f"⛔ Task cancelled")
-                break
-            if time.time() - overall_start_time > MAX_JOB_RUNTIME:
-                await throttled_send(chat_id, f"⏰ Job timeout")
-                break
-            if pdf['name'] in processed:
-                await throttled_send(chat_id, f"⏭️ স্কিপ: {pdf['name']} (আগেই প্রসেস করা হয়েছে)")
-                continue
-            await throttled_send(chat_id, f"📖 [{idx+1}/{len(pdf_files)}] শুরু: {pdf['name']}")
-            try:
-                pages_processed, total_pages, cancelled = await process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id)
-                if cancelled:
-                    is_cancelled = True
-                    break
-                processed.add(pdf['name'])
-                checkpoint['processed'] = list(processed)
-                checkpoint['current'] = None
-                checkpoint['last_page'] = 0
-                await async_save_checkpoint(folder_key, checkpoint)
-                await throttled_send(chat_id, f"✅ সম্পন্ন: {pdf['name']}\n📄 {total_pages} পৃষ্ঠা, 🚀 {pages_processed} পৃষ্ঠা প্রসেসিত")
-            except Exception as e:
-                error_msg = str(e)[:300]
-                await throttled_send(chat_id, f"❌ ব্যর্থ: {pdf['name']}\nত্রুটি: {error_msg}")
-                continue
-        async with running_tasks_lock:
-            if task_id in running_tasks:
-                if is_cancelled:
-                    running_tasks[task_id]["status"] = "cancelled"
-                else:
-                    running_tasks[task_id]["status"] = "completed"
-                running_tasks[task_id]["completed_at"] = time.time()
-        if not is_cancelled:
-            await throttled_send(chat_id, f"🎉 সব প্রসেস সম্পন্ন!\n\n📁 ডেটাসেট: {HF_DATASET}/{clean_folder_name}")
-    except Exception as e:
-        error_msg = traceback.format_exc()
-        await throttled_send(chat_id, f"❌ Error:\n{error_msg[:500]}")
-        async with running_tasks_lock:
-            if task_id in running_tasks:
-                running_tasks[task_id]["status"] = "failed"
-                running_tasks[task_id]["error"] = str(e)[:500]
-                running_tasks[task_id]["failed_at"] = time.time()
-    finally:
-        async with running_tasks_lock:
-            running_tasks.pop(task_id, None)
-        async with task_controls_lock:
-            task_controls.pop(task_id, None)
+            running_tasks[task_id]["status"] = "completed" if not is_cancelled else "cancelled"
 
 # ============ টেলিগ্রাম বট হ্যান্ডলার ============
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 MediaFire to HuggingFace Processor\n\n"
-        "কমান্ডসমূহ:\n"
-        "/start - শুরু করুন\n"
-        "/bookname - বইয়ের নাম সেট করুন\n"
-        "/confirm - প্রসেসিং নিশ্চিত করুন\n"
-        "/status - অগ্রগতি দেখুন\n"
-        "/cancel - বন্ধ করুন\n"
-        "/debug - সিস্টেম স্ট্যাটাস দেখুন\n\n"
-        "সরাসরি PDF লিংক পাঠানোর নিয়ম:\n"
+        "🚀 PDF to HuggingFace Processor\n\n"
+        "সাপোর্টেড লিংক:\n"
+        "✅ Internet Archive আইটেম: https://archive.org/details/...\n"
+        "✅ Internet Archive PDF: https://archive.org/download/.../1.pdf\n"
+        "✅ MediaFire PDF: https://www.mediafire.com/file/.../1.pdf/file\n\n"
+        "ব্যবহার:\n"
         "প্রথম লাইনে বইয়ের নাম\n"
-        "তারপর প্রতি লাইনে একটি PDF লিংক\n"
-        "তারপর /confirm",
-        parse_mode=None
+        "তারপর লিংক\n"
+        "তারপর /confirm\n\n"
+        "কমান্ড:\n"
+        "/start, /bookname, /confirm, /status, /cancel, /debug"
     )
 
 async def tg_bookname(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -685,185 +562,169 @@ async def tg_bookname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     book_name = ' '.join(context.args)
     context.user_data['folder_name'] = book_name
-    await update.message.reply_text(f"✅ বইয়ের নাম সেট করা হয়েছে: {book_name}")
+    await update.message.reply_text(f"✅ বই: {book_name}")
 
 async def tg_handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     lines = text.split('\n')
+    
     pdf_urls = []
-    folder_key = None
-    folder_name = None
     book_name = None
+    archive_item = None
+    
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        if '/file/' in line and ('.pdf' in line or line.endswith('/file')):
+        
+        # Internet Archive আইটেম পেজ
+        if 'archive.org/details/' in line:
+            archive_item = line
+        # Internet Archive সরাসরি PDF অথবা MediaFire PDF
+        elif ('archive.org/download/' in line or '/file/' in line) and '.pdf' in line:
             pdf_urls.append(line)
-        elif '/folder/' in line:
-            f_key, f_name = extract_from_mediafire_url(line)
-            if f_key:
-                folder_key = f_key
-                folder_name = f_name
+        # বইয়ের নাম
         elif not book_name and not line.startswith('http'):
             book_name = line
+    
+    # যদি Internet Archive আইটেম পেজ থাকে এবং কোনো সরাসরি PDF লিংক না থাকে
+    if archive_item and not pdf_urls:
+        await update.message.reply_text("🔍 Internet Archive থেকে PDF লিংক বের করা হচ্ছে...")
+        
+        pdf_urls = await extract_pdfs_from_archive_item(archive_item)
+        
+        if pdf_urls:
+            # PDF নাম্বার অনুযায়ী সর্ট করুন
+            def extract_number(url):
+                match = re.search(r'/(\d+)\.pdf', url)
+                return int(match.group(1)) if match else 999
+            pdf_urls.sort(key=extract_number)
+            
+            await update.message.reply_text(f"✅ {len(pdf_urls)}টি PDF লিংক পাওয়া গেছে!")
+        else:
+            await update.message.reply_text("❌ কোনো PDF লিংক বের করা যায়নি!\n\nঅনুগ্রহ করে সরাসরি PDF লিংক দিন:")
+            return
+    
     if pdf_urls:
         context.user_data['pdf_urls'] = pdf_urls
         if book_name:
             context.user_data['folder_name'] = book_name
         elif not context.user_data.get('folder_name'):
             context.user_data['folder_name'] = f"tafsir_{int(time.time())}"
+        
+        # প্রথম ৫টি লিংক দেখান
+        preview = "\n".join(pdf_urls[:5])
+        if len(pdf_urls) > 5:
+            preview += f"\n... এবং আরো {len(pdf_urls) - 5}টি"
+        
         await update.message.reply_text(
             f"📚 বই: {context.user_data['folder_name']}\n"
-            f"📄 {len(pdf_urls)}টি PDF লিংক পাওয়া গেছে।\n\n"
-            f"✅ প্রসেসিং শুরু করতে /confirm",
-            parse_mode=None
+            f"📄 {len(pdf_urls)}টি PDF\n\n"
+            f"লিংকসমূহ:\n{preview}\n\n"
+            f"✅ /confirm"
         )
         return
-    if folder_key:
-        await update.message.reply_text(
-            f"📁 ফোল্ডারের তথ্য:\n🔑 কী: {folder_key}\n📂 নাম: {folder_name}\n\n✅ প্রসেসিং শুরু করতে /confirm",
-            parse_mode=None
-        )
-        context.user_data['folder_key'] = folder_key
-        context.user_data['folder_name'] = folder_name
-        return
-    await update.message.reply_text("❌ কোনো PDF লিংক বা MediaFire ফোল্ডার লিংক পাওয়া যায়নি!")
+    
+    await update.message.reply_text("❌ কোনো PDF লিংক পাওয়া যায়নি!")
 
 async def tg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pdf_urls = context.user_data.get('pdf_urls')
-    folder_key = context.user_data.get('folder_key')
     folder_name = context.user_data.get('folder_name')
+    
     if pdf_urls:
         if not folder_name:
             folder_name = f"tafsir_{int(time.time())}"
-        await update.message.reply_text(f"🚀 প্রসেসিং শুরু হচ্ছে...\n📚 {len(pdf_urls)}টি PDF\n📁 বই: {folder_name}", parse_mode=None)
+        
+        await update.message.reply_text(f"🚀 শুরু হচ্ছে...\n📚 {len(pdf_urls)} PDF\n📁 {folder_name}")
+        
         task_id = f"direct_{update.effective_chat.id}_{int(time.time())}"
         async with running_tasks_lock:
-            running_tasks[task_id] = {
-                "status": "running",
-                "started_at": time.time(),
-                "pdf_urls": pdf_urls,
-                "folder_name": folder_name,
-                "chat_id": update.effective_chat.id
-            }
+            running_tasks[task_id] = {"status": "running", "started_at": time.time()}
         async with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
+        
         asyncio.create_task(process_pdf_urls(pdf_urls, folder_name, update.effective_chat.id, task_id))
-        await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!\n/cancel দিয়ে বন্ধ করতে পারেন।\n/status দিয়ে অগ্রগতি দেখুন।")
+        await update.message.reply_text("✅ শুরু হয়েছে! /status দেখুন")
         context.user_data['pdf_urls'] = None
         return
-    if folder_key:
-        if not folder_name:
-            folder_name = folder_key
-        await update.message.reply_text(f"🚀 প্রসেসিং শুরু হচ্ছে...\n📂 ফোল্ডার: {folder_name}", parse_mode=None)
-        task_id = f"{folder_key}_{update.effective_chat.id}_{int(time.time())}"
-        async with running_tasks_lock:
-            running_tasks[task_id] = {
-                "status": "running",
-                "started_at": time.time(),
-                "folder_key": folder_key,
-                "folder_name": folder_name,
-                "chat_id": update.effective_chat.id
-            }
-        async with task_controls_lock:
-            task_controls[task_id] = {"cancel": False}
-        asyncio.create_task(process_pdfs(folder_key, folder_name, update.effective_chat.id, task_id))
-        await update.message.reply_text("✅ প্রসেসিং শুরু হয়েছে!")
-        return
-    await update.message.reply_text("❌ আগে একটি MediaFire লিংক বা PDF লিংক দিন।")
+    
+    await update.message.reply_text("❌ আগে PDF লিংক দিন")
 
 async def tg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    folder_key = context.user_data.get('folder_key')
-    if not folder_key:
-        await update.message.reply_text("❌ কোনো সক্রিয় প্রসেস নেই।")
-        return
-    task_id_to_cancel = None
+    task_to_cancel = None
     async with running_tasks_lock:
         for tid, task in running_tasks.items():
-            if task.get("folder_key") == folder_key and task.get("status") == "running":
-                task_id_to_cancel = tid
+            if task.get("status") == "running":
+                task_to_cancel = tid
                 break
-    if task_id_to_cancel:
+    
+    if task_to_cancel:
         async with task_controls_lock:
-            if task_id_to_cancel in task_controls:
-                task_controls[task_id_to_cancel]["cancel"] = True
-                await update.message.reply_text("⛔ প্রসেস বন্ধ করার অনুরোধ পাঠানো হয়েছে...")
-            else:
-                await update.message.reply_text("❌ টাস্ক কন্ট্রোল পাওয়া যায়নি।")
+            if task_to_cancel in task_controls:
+                task_controls[task_to_cancel]["cancel"] = True
+        await update.message.reply_text("⛔ বন্ধ করা হচ্ছে...")
     else:
-        await update.message.reply_text("❌ কোনো চলমান প্রসেস নেই।")
-    context.user_data.clear()
+        await update.message.reply_text("❌ কোনো চলমান প্রসেস নেই")
 
 async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    folder_key = context.user_data.get('folder_key')
-    folder_name = context.user_data.get('folder_name')
-    if folder_key:
-        checkpoint = await load_checkpoint(folder_key)
-    elif folder_name:
-        checkpoint = await load_checkpoint(f"direct_{folder_name.replace(' ', '_')}")
-    else:
-        await update.message.reply_text("❌ কোনো সক্রিয় প্রসেস নেই।")
-        return
+    folder_name = context.user_data.get('folder_name', 'tafsir')
+    clean_name = folder_name.replace(' ', '_')
+    checkpoint = await load_checkpoint(f"direct_{clean_name}")
+    
+    processed = checkpoint.get('processed', [])
+    current = checkpoint.get('current', 'কিছু না')
+    last_page = checkpoint.get('last_page', 0)
+    
     await update.message.reply_text(
-        f"📊 বর্তমান অবস্থা:\n✅ প্রসেস হয়েছে: {len(checkpoint.get('processed', []))}টি PDF\n"
-        f"🔄 চলমান: {checkpoint.get('current', 'কিছু না')}\n"
-        f"📄 শেষ পৃষ্ঠা: {checkpoint.get('last_page', 0)}",
-        parse_mode=None
+        f"📊 অবস্থা:\n"
+        f"✅ প্রসেস: {len(processed)}টি PDF\n"
+        f"🔄 চলমান: {current}\n"
+        f"📄 শেষ পৃষ্ঠা: {last_page}"
     )
 
 async def tg_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = []
-    status.append("🔧 সিস্টেম স্ট্যাটাস:")
-    status.append(f"📧 MediaFire Email: {'✅ সেট' if MEDIAFIRE_EMAIL else '❌ নেই'}")
-    status.append(f"🔑 MediaFire Pass: {'✅ সেট' if MEDIAFIRE_PASSWORD else '❌ নেই'}")
-    status.append(f"🤗 HF Token: {'✅ সেট' if HF_TOKEN else '❌ নেই'}")
-    status.append(f"📁 HF Dataset: {HF_DATASET or '❌ নেই'}")
-    status.append(f"🤖 Bot Token: {'✅ সেট' if TELEGRAM_BOT_TOKEN else '❌ নেই'}")
-    async with running_tasks_lock:
-        status.append(f"⚙️ চলমান টাস্ক: {len(running_tasks)}")
-    try:
-        api = await get_mediafire_session()
-        status.append("🔗 MediaFire: ✅ সংযুক্ত")
-    except Exception as e:
-        status.append(f"🔗 MediaFire: ❌ {str(e)[:50]}")
+    status = [
+        "🔧 স্ট্যাটাস:",
+        f"📧 MediaFire: {'✅' if MEDIAFIRE_EMAIL else '❌'}",
+        f"🤗 HF Token: {'✅' if HF_TOKEN else '❌'}",
+        f"📁 HF Dataset: {HF_DATASET or '❌'}",
+        f"🤖 Bot Token: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}",
+        f"⚙️ চলমান টাস্ক: {len(running_tasks)}"
+    ]
     try:
         total, used, free = shutil.disk_usage("/tmp")
-        free_mb = free // (1024 * 1024)
-        status.append(f"💾 ফ্রি স্পেস: {free_mb} MB")
+        status.append(f"💾 ফ্রি: {free // (1024*1024)} MB")
     except:
-        status.append("💾 ফ্রি স্পেস: জানা যায়নি")
+        pass
     await update.message.reply_text("\n".join(status))
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
     global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
     global _bot_initialized, _updater_started
+    
     async with _bot_init_lock:
         if _bot_initialized:
-            print("⚠️ বট আগেই চালু আছে, স্কিপ করা হচ্ছে")
             return
-        print("🔧 setup_bot() শুরু হয়েছে", flush=True)
+        print("🔧 setup_bot() শুরু")
+        
         telegram_worker_task = asyncio.create_task(telegram_worker())
         checkpoint_writer_task = asyncio.create_task(checkpoint_writer_worker())
         disk_cleanup_task = asyncio.create_task(disk_cleanup_worker())
+        
         if not TELEGRAM_BOT_TOKEN:
-            print("⚠️ TELEGRAM_BOT_TOKEN সেট করা নেই।")
+            print("⚠️ TELEGRAM_BOT_TOKEN নেই")
             return
+        
         try:
             temp_bot = Bot(token=TELEGRAM_BOT_TOKEN)
             await temp_bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
             await temp_bot.close()
-            print("✅ আগের সব বট সেশন ক্লিয়ার করা হয়েছে")
+            print("✅ সেশন ক্লিয়ার")
         except Exception as e:
-            print(f"⚠️ সেশন ক্লিয়ার করতে সমস্যা: {e}")
-        if application is not None:
-            try:
-                await application.shutdown()
-            except:
-                pass
-            application = None
+            print(f"⚠️ সেশন ক্লিয়ার সমস্যা: {e}")
+        
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         application.add_handler(CommandHandler('start', tg_start))
         application.add_handler(CommandHandler('bookname', tg_bookname))
@@ -872,59 +733,24 @@ async def setup_bot():
         application.add_handler(CommandHandler('status', tg_status))
         application.add_handler(CommandHandler('debug', tg_debug))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_link))
+        
         await application.initialize()
         await application.start()
+        
         if not _updater_started:
-            asyncio.create_task(application.updater.start_polling(
-                poll_interval=1.0,
-                timeout=30,
-                drop_pending_updates=True
-            ))
+            asyncio.create_task(application.updater.start_polling(poll_interval=1.0, timeout=30, drop_pending_updates=True))
             _updater_started = True
-            print("🤖 Telegram বট চলছে (ক্লিন অ্যাসিঙ্ক মোড)")
-        else:
-            print("⚠️ Polling আগেই চলছে, আবার শুরু করা হয়নি")
+            print("🤖 বট চলছে")
+        
         _bot_initialized = True
 
 async def shutdown_bot():
-    global shutdown_in_progress, application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
-    global _bot_initialized, _updater_started
+    global shutdown_in_progress, application
     shutdown_in_progress = True
-    print("🛑 বন্ধ করা হচ্ছে...")
-    if application and hasattr(application, 'updater') and application.updater:
-        try:
-            await application.updater.stop()
-        except Exception as e:
-            print(f"Updater বন্ধ করতে সমস্যা: {e}")
-    if telegram_worker_task:
-        await telegram_queue.put(None)
-        telegram_worker_task.cancel()
-        try:
-            await telegram_worker_task
-        except asyncio.CancelledError:
-            pass
-    if checkpoint_writer_task:
-        await checkpoint_write_queue.put(None)
-        checkpoint_writer_task.cancel()
-        try:
-            await checkpoint_writer_task
-        except asyncio.CancelledError:
-            pass
-    if disk_cleanup_task:
-        disk_cleanup_task.cancel()
-        try:
-            await disk_cleanup_task
-        except asyncio.CancelledError:
-            pass
+    print("🛑 বন্ধ হচ্ছে...")
     if application:
-        try:
-            await application.stop()
-            await application.shutdown()
-            print("🤖 Telegram বট বন্ধ হয়েছে")
-        except Exception as e:
-            print(f"বট বন্ধ করতে সমস্যা: {e}")
-    _bot_initialized = False
-    _updater_started = False
+        await application.stop()
+        await application.shutdown()
 
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
@@ -937,66 +763,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Tafsir Image Processor is running"}
-
-@app.get("/test-mediafire")
-async def test_mediafire():
-    try:
-        api = MediaFireApi()
-        session = api.user_get_session_token(
-            email=MEDIAFIRE_EMAIL,
-            password=MEDIAFIRE_PASSWORD,
-            app_id='42511'
-        )
-        return {"status": "success", "message": "MediaFire login successful", "email": MEDIAFIRE_EMAIL}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.post("/start_processing")
-async def start_processing(request: ProcessRequest):
-    task_id = f"api_{request.telegram_chat_id}_{int(time.time())}"
-    async with running_tasks_lock:
-        running_tasks[task_id] = {
-            "status": "running",
-            "started_at": time.time(),
-            "chat_id": request.telegram_chat_id
-        }
-    async with task_controls_lock:
-        task_controls[task_id] = {"cancel": False}
-    if request.pdf_urls:
-        asyncio.create_task(process_pdf_urls(
-            request.pdf_urls, 
-            request.folder_name or f"tafsir_{int(time.time())}", 
-            request.telegram_chat_id, 
-            task_id
-        ))
-    elif request.folder_key:
-        asyncio.create_task(process_pdfs(
-            request.folder_key, 
-            request.folder_name or request.folder_key, 
-            request.telegram_chat_id, 
-            task_id
-        ))
-    else:
-        raise HTTPException(status_code=400, detail="folder_key or pdf_urls required")
-    return {"status": "started", "message": "Processing started", "task_id": task_id}
-
-@app.post("/cancel/{task_id}")
-async def cancel_task(task_id: str):
-    async with task_controls_lock:
-        if task_id in task_controls:
-            task_controls[task_id]["cancel"] = True
-            return {"status": "cancelling", "message": "Task cancellation requested"}
-    raise HTTPException(status_code=404, detail="Task not found")
-
-@app.get("/status/{folder_key}")
-async def get_status(folder_key: str):
-    checkpoint = await load_checkpoint(folder_key)
-    return {
-        "processed": len(checkpoint.get('processed', [])),
-        "current": checkpoint.get('current'),
-        "last_page": checkpoint.get('last_page', 0)
-    }
+    return {"status": "ok", "message": "Tafsir Image Processor"}
 
 @app.get("/tasks")
 async def get_tasks():
