@@ -395,6 +395,7 @@ async def is_task_cancelled(task_id):
 async def process_single_pdf(pdf, clean_folder_name, folder_key, chat_id, checkpoint, task_id):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
+    await send_telegram_safe(chat_id, f"🚀 প্রসেসিং শুরু!\n📁 {clean_folder_name}\n📚 {len(pdf_urls)}টি PDF")
     await throttled_send(chat_id, f"📄 প্রসেসিং: {pdf['name']}\n📁 লোকেশন: {full_hf_path}")
     
     start_page = 0
@@ -502,6 +503,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, chat_id: int, task_
     try:
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
         await throttled_send(chat_id, f"🚀 প্রসেসিং শুরু!\n📁 {clean_folder_name}\n📚 {len(pdf_urls)}টি PDF")
+        await send_telegram_safe(chat_id, f"🚀 প্রসেসিং শুরু!\n📁 {clean_folder_name}\n📚 {len(pdf_urls)}টি PDF")
         
         overall_start_time = time.time()
         is_cancelled = False
