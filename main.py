@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form with Live Progress Bar
+FastAPI + HTML Form with Live Progress Bar (urllib download fix)
 """
 
 import os
@@ -15,7 +15,9 @@ import traceback
 import gc
 import tempfile
 import threading
-import requests
+import urllib.request
+import urllib.error
+import ssl
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -50,6 +52,11 @@ upload_semaphore = asyncio.Semaphore(UPLOAD_CONCURRENCY)
 page_hash_cache = OrderedDict()
 page_hash_cache_lock = asyncio.Lock()
 shutdown_in_progress = False
+
+# SSL কনটেক্সট (সার্টিফিকেট ভেরিফিকেশন বন্ধ)
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 class ProcessRequest(BaseModel):
     book_name: str
@@ -120,34 +127,49 @@ async def load_checkpoint(folder_key):
         pass
     return {"processed": [], "current": None, "last_page": 0, "last_page_map": {}}
 
-# ============ PDF ডাউনলোড ============
+# ============ PDF ডাউনলোড (urllib ব্যবহার করে - ফিক্সড) ============
 def download_pdf_stream(url):
-    """requests ব্যবহার করে PDF ডাউনলোড করুন"""
+    """urllib ব্যবহার করে PDF ডাউনলোড করুন (Render-এ কাজ করে)"""
     print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
     
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/pdf,application/octet-stream,*/*',
-            'Referer': 'https://archive.org/'
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://archive.org/',
+            'Connection': 'keep-alive'
         }
         
-        response = requests.get(url, headers=headers, stream=True, timeout=300)
-        response.raise_for_status()
+        req = urllib.request.Request(url, headers=headers)
         
-        total_size = 0
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
+        # 🔥 urllib দিয়ে ডাউনলোড (SSL ভেরিফিকেশন বন্ধ)
+        with urllib.request.urlopen(req, context=ssl_context, timeout=300) as response:
+            total_size = 0
+            while True:
+                chunk = response.read(8192)
+                if not chunk:
+                    break
                 temp_file.write(chunk)
                 total_size += len(chunk)
+            
+            print(f"[DEBUG] Downloaded: {total_size} bytes", flush=True)
         
-        print(f"[DEBUG] Downloaded: {total_size} bytes", flush=True)
         temp_file.close()
         return temp_file.name
         
+    except urllib.error.URLError as e:
+        print(f"[DEBUG] URL Error: {e}", flush=True)
+        temp_file.close()
+        try:
+            os.unlink(temp_file.name)
+        except:
+            pass
+        raise e
     except Exception as e:
         print(f"[DEBUG] Download error: {e}", flush=True)
+        traceback.print_exc()
         temp_file.close()
         try:
             os.unlink(temp_file.name)
@@ -305,6 +327,11 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
             pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
             print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
 
+            # 🔥 টাস্ক স্ট্যাটাস আপডেট - চলমান PDF
+            async with running_tasks_lock:
+                if task_id in running_tasks:
+                    running_tasks[task_id]["current_pdf"] = pdf_name
+
             try:
                 pages_processed, total_pages, cancelled = await process_single_pdf(
                     pdf, clean_folder_name, f"direct_{clean_folder_name}", checkpoint, task_id
@@ -317,7 +344,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
                 print(f"[INFO] Completed: {pdf_name} ({total_pages} pages)", flush=True)
                 
-                # 🔥 টাস্ক স্ট্যাটাস আপডেট
+                # 🔥 টাস্ক স্ট্যাটাস আপডেট - সম্পন্ন PDF
                 async with running_tasks_lock:
                     if task_id in running_tasks:
                         running_tasks[task_id]["completed_pdfs"] = len(processed)
@@ -676,20 +703,20 @@ async def home():
 async def health():
     return {"status": "ok"}
 
-@app.get("/test-process")
-async def test_process():
+@app.get("/test-download")
+async def test_download():
+    """urllib দিয়ে ডাউনলোড টেস্ট"""
     try:
         url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
-        response = requests.get(url, stream=True, timeout=60)
-        total = 0
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                temp_file.write(chunk)
-                total += len(chunk)
-        temp_file.close()
-        os.unlink(temp_file.name)
-        return {"status": "success", "downloaded_bytes": total}
+        print(f"[TEST] Downloading: {url}", flush=True)
+        
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        req = urllib.request.Request(url, headers=headers)
+        
+        with urllib.request.urlopen(req, context=ssl_context, timeout=60) as response:
+            data = response.read()
+            
+        return {"status": "success", "downloaded_bytes": len(data)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -739,6 +766,7 @@ async def process_form(request: Request):
             daemon=True
         )
         thread.start()
+        print(f"[DEBUG] Thread started for task {task_id}", flush=True)
         
         return {
             "status": "started",
