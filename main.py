@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form (No File System)
+FastAPI + HTML Form (Requests Library - Working on Render)
 """
 
 import os
@@ -15,13 +15,13 @@ import traceback
 import gc
 import tempfile
 import threading
+import requests
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import httpx
 import fitz  # PyMuPDF
 from huggingface_hub import HfApi, upload_file
 
@@ -57,6 +57,7 @@ class ProcessRequest(BaseModel):
 
 # ============ Threading Helper ============
 def run_async_in_thread(coro, *args):
+    """একটি আলাদা থ্রেডে async ফাংশন রান করুন"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -119,46 +120,11 @@ async def load_checkpoint(folder_key):
         pass
     return {"processed": [], "current": None, "last_page": 0, "last_page_map": {}}
 
-# ============ Internet Archive ============
-async def extract_pdfs_from_archive_item(item_url: str, max_pdfs: int = 30):
-    pdf_urls = []
-    try:
-        item_match = re.search(r'/details/([^/?]+)', item_url)
-        if not item_match:
-            return pdf_urls
-        item_id = item_match.group(1)
-        print(f"[Archive] Extracting from: {item_id}", flush=True)
-        
-        # প্রথমে নাম্বার অনুযায়ী ট্রাই করুন (সবচেয়ে কমন প্যাটার্ন)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for i in range(1, max_pdfs + 1):
-                test_url = f"https://archive.org/download/{item_id}/{i}.pdf"
-                try:
-                    response = await client.head(test_url)
-                    if response.status_code == 200:
-                        pdf_urls.append(test_url)
-                except:
-                    pass
-        
-        # যদি না পাওয়া যায়, মেটাডেটা API ট্রাই করুন
-        if not pdf_urls:
-            metadata_url = f"https://archive.org/metadata/{item_id}"
-            response = await client.get(metadata_url)
-            if response.status_code == 200:
-                data = response.json()
-                for file_info in data.get('files', []):
-                    file_name = file_info.get('name', '')
-                    if file_name.lower().endswith('.pdf'):
-                        pdf_urls.append(f"https://archive.org/download/{item_id}/{file_name}")
-    except Exception as e:
-        print(f"[Archive] Error: {e}", flush=True)
-    
-    return pdf_urls
-
-# ============ PDF ডাউনলোড ============
-async def download_pdf_stream(url):
+# ============ PDF ডাউনলোড (requests ব্যবহার করে) ============
+def download_pdf_stream(url):
+    """requests ব্যবহার করে PDF ডাউনলোড করুন (সিঙ্ক্রোনাস)"""
     print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
-    await check_disk_space()
+    
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     try:
         headers = {
@@ -166,16 +132,20 @@ async def download_pdf_stream(url):
             'Accept': 'application/pdf,application/octet-stream,*/*',
             'Referer': 'https://archive.org/'
         }
-        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True, headers=headers) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                total_size = 0
-                async for chunk in response.aiter_bytes(chunk_size=8192):
-                    temp_file.write(chunk)
-                    total_size += len(chunk)
-                print(f"[DEBUG] Downloaded: {total_size} bytes", flush=True)
+        
+        response = requests.get(url, headers=headers, stream=True, timeout=300)
+        response.raise_for_status()
+        
+        total_size = 0
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                temp_file.write(chunk)
+                total_size += len(chunk)
+        
+        print(f"[DEBUG] Downloaded: {total_size} bytes", flush=True)
         temp_file.close()
         return temp_file.name
+        
     except Exception as e:
         print(f"[DEBUG] Download error: {e}", flush=True)
         temp_file.close()
@@ -244,7 +214,8 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
 
     print(f"[INFO] Downloading: {pdf['name']}", flush=True)
     try:
-        pdf_path = await download_pdf_stream(pdf['download_link'])
+        # 🔥 requests ব্যবহার করে ডাউনলোড (await নেই)
+        pdf_path = download_pdf_stream(pdf['download_link'])
     except Exception as e:
         print(f"[ERROR] Download failed: {e}", flush=True)
         return 0, 0, False
@@ -365,7 +336,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)
 
-# ============ HTML টেমপ্লেট (সরাসরি স্ট্রিং হিসেবে) ============
+# ============ HTML টেমপ্লেট ============
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="bn">
@@ -389,126 +360,52 @@ HTML_TEMPLATE = """
             padding: 30px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
-        h1 {
-            color: #1a5f7a;
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 2em;
-        }
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: bold;
-            color: #333;
-        }
-        input, textarea {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #ddd;
-            border-radius: 10px;
-            font-size: 14px;
-            transition: border-color 0.3s;
-        }
-        input:focus, textarea:focus {
-            outline: none;
-            border-color: #1a5f7a;
-        }
+        h1 { color: #1a5f7a; text-align: center; margin-bottom: 10px; font-size: 2em; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 30px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
         textarea {
-            min-height: 200px;
+            width: 100%; padding: 12px 15px; border: 2px solid #ddd;
+            border-radius: 10px; font-size: 14px; min-height: 200px;
             font-family: monospace;
         }
+        textarea:focus { outline: none; border-color: #1a5f7a; }
         .btn {
             background: linear-gradient(135deg, #1a5f7a 0%, #0d3b4c 100%);
-            color: white;
-            border: none;
-            padding: 15px 30px;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            width: 100%;
-            transition: transform 0.2s;
+            color: white; border: none; padding: 15px 30px;
+            border-radius: 10px; font-size: 16px; font-weight: bold;
+            cursor: pointer; width: 100%; transition: transform 0.2s;
         }
-        .btn:hover {
-            transform: scale(1.02);
-        }
-        .btn-group {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-        }
-        .btn-secondary {
-            background: #6c757d;
-            flex: 1;
-        }
-        .btn-primary {
-            background: linear-gradient(135deg, #1a5f7a 0%, #0d3b4c 100%);
-            flex: 2;
-        }
+        .btn:hover { transform: scale(1.02); }
+        .btn-group { display: flex; gap: 10px; margin-bottom: 20px; }
+        .btn-secondary { background: #6c757d; flex: 1; }
+        .btn-primary { background: linear-gradient(135deg, #1a5f7a 0%, #0d3b4c 100%); flex: 2; }
         .result {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 10px;
-            display: none;
+            margin-top: 20px; padding: 15px; border-radius: 10px; display: none;
         }
         .result.success {
-            background: #d4edda;
-            border: 1px solid #c3e6cb;
-            color: #155724;
-            display: block;
+            background: #d4edda; border: 1px solid #c3e6cb;
+            color: #155724; display: block;
         }
         .result.error {
-            background: #f8d7da;
-            border: 1px solid #f5c6cb;
-            color: #721c24;
-            display: block;
+            background: #f8d7da; border: 1px solid #f5c6cb;
+            color: #721c24; display: block;
         }
         .info-box {
-            background: #e7f3ff;
-            border: 1px solid #b8daff;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 20px;
+            background: #e7f3ff; border: 1px solid #b8daff;
+            border-radius: 10px; padding: 15px; margin-bottom: 20px;
         }
-        .info-box h3 {
-            color: #004085;
-            margin-bottom: 10px;
-        }
-        .info-box ul {
-            margin-left: 20px;
-            color: #004085;
-        }
-        .quick-buttons {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-            flex-wrap: wrap;
-        }
+        .info-box h3 { color: #004085; margin-bottom: 10px; }
+        .info-box ul { margin-left: 20px; color: #004085; }
+        .quick-buttons { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
         .quick-btn {
-            background: #e9ecef;
-            border: 1px solid #ced4da;
-            padding: 8px 15px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 12px;
+            background: #e9ecef; border: 1px solid #ced4da;
+            padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 12px;
         }
-        .quick-btn:hover {
-            background: #dee2e6;
-        }
+        .quick-btn:hover { background: #dee2e6; }
         .status-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
+            display: inline-block; padding: 3px 10px; border-radius: 20px;
+            font-size: 12px; font-weight: bold;
         }
         .status-running { background: #fff3cd; color: #856404; }
         .status-completed { background: #d4edda; color: #155724; }
@@ -525,7 +422,6 @@ HTML_TEMPLATE = """
             <ul>
                 <li>প্রথম লাইনে বইয়ের নাম লিখুন (ইংরেজি বা বাংলা)</li>
                 <li>তারপর প্রতি লাইনে একটি করে PDF লিংক দিন</li>
-                <li>Internet Archive আইটেম লিংক দিলে অটোমেটিক সব PDF বের হবে</li>
             </ul>
         </div>
 
@@ -541,8 +437,7 @@ HTML_TEMPLATE = """
                 <label for="inputData">📄 বইয়ের নাম ও PDF লিংকসমূহ:</label>
                 <textarea id="inputData" name="inputData" placeholder="উদাহরণ:
 তাফসীর ফী যিলালিল কোরআন
-https://archive.org/download/20260415_20260415_0945/1.pdf
-https://archive.org/download/20260415_20260415_0945/2.pdf"></textarea>
+https://archive.org/download/20260415_20260415_0945/1.pdf"></textarea>
             </div>
             
             <div class="btn-group">
@@ -703,12 +598,34 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    """HTML ফর্ম দেখান"""
     return HTMLResponse(content=HTML_TEMPLATE)
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.get("/test-process")
+async def test_process():
+    """প্রসেসিং টেস্ট করুন - requests ব্যবহার করে"""
+    try:
+        url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
+        print(f"[TEST] Downloading: {url}", flush=True)
+        
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+        response = requests.get(url, stream=True, timeout=60)
+        
+        total = 0
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                temp_file.write(chunk)
+                total += len(chunk)
+        temp_file.close()
+        
+        os.unlink(temp_file.name)
+        
+        return {"status": "success", "downloaded_bytes": total}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/process")
 async def process_form(request: Request):
@@ -721,19 +638,18 @@ async def process_form(request: Request):
         if not urls:
             return {"status": "error", "message": "কোনো PDF লিংক দেওয়া হয়নি"}
         
-        # Internet Archive আইটেম চেক
         pdf_urls = []
         for url in urls:
             if 'archive.org/details/' in url:
-                extracted = await extract_pdfs_from_archive_item(url)
-                pdf_urls.extend(extracted)
+                item_id = url.split('/')[-1]
+                for i in range(1, 23):
+                    pdf_urls.append(f"https://archive.org/download/{item_id}/{i}.pdf")
             else:
                 pdf_urls.append(url)
         
         if not pdf_urls:
             return {"status": "error", "message": "কোনো বৈধ PDF লিংক পাওয়া যায়নি"}
         
-        # নাম্বার অনুযায়ী সর্ট
         def extract_number(url):
             match = re.search(r'/(\d+)\.pdf', url)
             return int(match.group(1)) if match else 999
@@ -751,6 +667,7 @@ async def process_form(request: Request):
             daemon=True
         )
         thread.start()
+        print(f"[DEBUG] Thread started for task {task_id}", flush=True)
         
         return {
             "status": "started",
@@ -760,56 +677,14 @@ async def process_form(request: Request):
             "pdf_count": len(pdf_urls)
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.get("/test-process")
-async def test_process():
-    """প্রসেসিং টেস্ট করুন"""
-    try:
-        url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
-        print(f"[TEST] Downloading: {url}", flush=True)
-        
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with client.stream("GET", url) as response:
-                async for chunk in response.aiter_bytes():
-                    temp_file.write(chunk)
-        temp_file.close()
-        
-        size = os.path.getsize(temp_file.name)
-        os.unlink(temp_file.name)
-        
-        return {"status": "success", "downloaded_bytes": size}
-    except Exception as e:
+        print(f"[ERROR] /process: {e}", flush=True)
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
 @app.get("/tasks")
 async def get_tasks():
-    """চলমান টাস্ক দেখুন"""
     async with running_tasks_lock:
         return {k: v for k, v in running_tasks.items()}
-
-@app.get("/test-connection")
-async def test_connection():
-    """Internet Archive সংযোগ টেস্ট"""
-    try:
-        import socket
-        import requests
-        
-        # DNS টেস্ট
-        ip = socket.gethostbyname("archive.org")
-        
-        # HTTP টেস্ট
-        response = requests.get("https://archive.org", timeout=10)
-        
-        return {
-            "status": "success",
-            "archive.org_ip": ip,
-            "http_status": response.status_code
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-        
 
 @app.post("/cancel/{task_id}")
 async def cancel_task(task_id: str):
