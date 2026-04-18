@@ -989,44 +989,61 @@ async def my_folders():
         )
         api.session = session
         
-        # রুট ফোল্ডার কন্টেন্ট - এটি dict রিটার্ন করে
+        # রুট ফোল্ডার কন্টেন্ট
         root_content = api.folder_get_content()
         
-        print(f"[DEBUG] Root content type: {type(root_content)}")
+        print(f"[DEBUG] Type: {type(root_content)}")
+        print(f"[DEBUG] First 200 chars: {str(root_content)[:200]}")
         
-        folders = []
-        
-        # সরাসরি dict হিসেবে ব্যবহার করুন
-        folder_content = root_content.get('folder_content', [])
-        
-        for item in folder_content:
-            if item.get('type') == 'folder':
-                folder_info = {
-                    'name': item.get('name', 'Unknown'),
-                    'key': item.get('folderkey', 'Unknown'),
-                    'created': item.get('created', 'Unknown')
+        # স্ট্রিং হলে JSON পার্স করুন
+        if isinstance(root_content, str):
+            try:
+                root_content = json.loads(root_content)
+            except json.JSONDecodeError as e:
+                return {
+                    "status": "error",
+                    "message": f"JSON parse error: {e}",
+                    "raw": root_content[:500]
                 }
-                folders.append(folder_info)
-                
-                # সাবফোল্ডারে ফাইল চেক করুন
-                try:
-                    sub_content = api.folder_get_content(folder_key=item.get('folderkey'))
-                    sub_files = sub_content.get('folder_content', [])
-                    folder_info['file_count'] = len([f for f in sub_files if f.get('type') == 'file'])
-                except:
-                    folder_info['file_count'] = 'Unknown'
         
-        # রুট ফোল্ডারের ফাইল
-        root_files = [f for f in folder_content if f.get('type') == 'file']
-        
-        return {
-            "status": "success",
-            "total_folders": len(folders),
-            "total_root_files": len(root_files),
-            "root_files": [f.get('filename') for f in root_files[:10]],
-            "folders": folders,
-            "account_email": MEDIAFIRE_EMAIL
-        }
+        # এখন dict হিসেবে ব্যবহার করুন
+        if isinstance(root_content, dict):
+            folder_content = root_content.get('response', {}).get('folder_content', [])
+            if not folder_content:
+                folder_content = root_content.get('folder_content', [])
+            
+            folders = []
+            files = []
+            
+            for item in folder_content:
+                if isinstance(item, dict):
+                    if item.get('type') == 'folder':
+                        folders.append({
+                            'name': item.get('name'),
+                            'key': item.get('folderkey'),
+                            'created': item.get('created')
+                        })
+                    elif item.get('type') == 'file':
+                        files.append({
+                            'name': item.get('filename'),
+                            'quickkey': item.get('quickkey')
+                        })
+            
+            return {
+                "status": "success",
+                "total_folders": len(folders),
+                "total_files": len(files),
+                "folders": folders,
+                "files": files[:20],
+                "account_email": MEDIAFIRE_EMAIL
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Unexpected type: {type(root_content)}",
+                "raw": str(root_content)[:500]
+            }
+            
     except Exception as e:
         import traceback
         return {
@@ -1034,6 +1051,116 @@ async def my_folders():
             "message": str(e),
             "traceback": traceback.format_exc()[:1000]
         }
+
+
+@app.get("/test-folder-fixed/{folder_key}")
+async def test_folder_fixed(folder_key: str):
+    """MediaFire ফোল্ডার কন্টেন্ট টেস্ট - ফিক্সড ভার্সন"""
+    try:
+        import json
+        
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        api.session = session
+        
+        # ফোল্ডার কন্টেন্ট
+        content = api.folder_get_content(folder_key=folder_key)
+        
+        # স্ট্রিং হলে JSON পার্স করুন
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except:
+                return {"status": "error", "message": "JSON parse failed", "raw": content[:500]}
+        
+        # response কী এর ভিতরে থাকতে পারে
+        if 'response' in content:
+            folder_content = content.get('response', {}).get('folder_content', [])
+        else:
+            folder_content = content.get('folder_content', [])
+        
+        files = []
+        folders = []
+        
+        for item in folder_content:
+            if isinstance(item, dict):
+                item_type = item.get('type')
+                if item_type == 'file':
+                    files.append({
+                        'name': item.get('filename'),
+                        'quickkey': item.get('quickkey'),
+                        'size': item.get('size')
+                    })
+                elif item_type == 'folder':
+                    folders.append({
+                        'name': item.get('name'),
+                        'folderkey': item.get('folderkey')
+                    })
+        
+        return {
+            "status": "success",
+            "folder_key": folder_key,
+            "total_folders": len(folders),
+            "total_files": len(files),
+            "folders": folders[:10],
+            "files": files[:20]
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error", 
+            "message": str(e),
+            "traceback": traceback.format_exc()[:500]
+        }
+
+@app.get("/http-folders")
+async def http_folders():
+    """HTTPX দিয়ে সরাসরি MediaFire API কল"""
+    try:
+        import xml.etree.ElementTree as ET
+        
+        async with httpx.AsyncClient() as client:
+            # প্রথমে session token নিন
+            login_response = await client.post(
+                "https://www.mediafire.com/api/1.5/user/get_session_token.php",
+                data={
+                    "email": MEDIAFIRE_EMAIL,
+                    "password": MEDIAFIRE_PASSWORD,
+                    "application_id": "42511",
+                    "token_version": "2",
+                    "response_format": "json"
+                }
+            )
+            
+            if login_response.status_code == 200:
+                login_data = login_response.json()
+                session_token = login_data.get("response", {}).get("session_token")
+                
+                if session_token:
+                    # ফোল্ডার কন্টেন্ট নিন
+                    folder_response = await client.get(
+                        "https://www.mediafire.com/api/1.5/folder/get_content.php",
+                        params={
+                            "session_token": session_token,
+                            "response_format": "json",
+                            "content_type": "folders"
+                        }
+                    )
+                    
+                    return {
+                        "status": "success",
+                        "login": "ok",
+                        "folder_data": folder_response.json()
+                    }
+            
+            return {"status": "error", "login_response": login_response.text}
+            
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/test-folder-fixed/{folder_key}")
 async def test_folder_fixed(folder_key: str):
