@@ -975,9 +975,69 @@ async def my_folders():
 
 # FastAPI অ্যাপ সেকশনে যোগ করুন (lifespan এর পরে)
 
-@app.get("/test-folder/{folder_key}")
-async def test_folder(folder_key: str):
-    """MediaFire ফোল্ডার কন্টেন্ট টেস্ট"""
+@app.get("/my-folders")
+async def my_folders():
+    """আপনার MediaFire অ্যাকাউন্টের সব ফোল্ডার দেখুন"""
+    try:
+        import json
+        
+        api = MediaFireApi()
+        session = api.user_get_session_token(
+            email=MEDIAFIRE_EMAIL,
+            password=MEDIAFIRE_PASSWORD,
+            app_id='42511'
+        )
+        api.session = session
+        
+        # রুট ফোল্ডার কন্টেন্ট
+        root_content = api.folder_get_content()
+        
+        # ডিবাগ প্রিন্ট
+        print(f"[DEBUG] Root content type: {type(root_content)}")
+        print(f"[DEBUG] Root content: {root_content}")
+        
+        # স্ট্রিং থেকে dict এ কনভার্ট
+        if isinstance(root_content, str):
+            try:
+                root_content = json.loads(root_content)
+            except:
+                return {
+                    "status": "error", 
+                    "message": "Failed to parse JSON response",
+                    "raw": root_content[:500]
+                }
+        
+        folders = []
+        
+        if isinstance(root_content, dict):
+            folder_content = root_content.get('folder_content', [])
+            
+            for item in folder_content:
+                if isinstance(item, dict) and item.get('type') == 'folder':
+                    folder_info = {
+                        'name': item.get('name', 'Unknown'),
+                        'key': item.get('folderkey', 'Unknown'),
+                        'created': item.get('created', 'Unknown')
+                    }
+                    folders.append(folder_info)
+        
+        return {
+            "status": "success",
+            "total_folders": len(folders),
+            "folders": folders,
+            "account_email": MEDIAFIRE_EMAIL
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error", 
+            "message": str(e),
+            "traceback": traceback.format_exc()[:1000]
+        }
+
+@app.get("/raw-test")
+async def raw_test():
+    """Raw API response দেখুন"""
     try:
         api = MediaFireApi()
         session = api.user_get_session_token(
@@ -987,51 +1047,59 @@ async def test_folder(folder_key: str):
         )
         api.session = session
         
-        # ফোল্ডার কন্টেন্ট আনুন
-        content = api.folder_get_content(folder_key=folder_key)
-        
-        # ডিবাগ: রেসপন্স টাইপ দেখুন
-        print(f"[DEBUG] Content type: {type(content)}")
-        print(f"[DEBUG] Content: {content}")
-        
-        files = []
-        
-        # রেসপন্স টাইপ চেক করুন
-        if isinstance(content, dict):
-            folder_content = content.get('folder_content', [])
-        elif isinstance(content, str):
-            # যদি স্ট্রিং হয়, JSON পার্স করার চেষ্টা করুন
-            import json
-            try:
-                content = json.loads(content)
-                folder_content = content.get('folder_content', [])
-            except:
-                folder_content = []
-        else:
-            folder_content = []
-        
-        for item in folder_content:
-            if isinstance(item, dict):
-                files.append({
-                    'name': item.get('filename', 'Unknown'),
-                    'type': item.get('type', 'Unknown'),
-                    'quickkey': item.get('quickkey', 'Unknown')
-                })
+        # সরাসরি API কল
+        response = api.user_get_info()
         
         return {
             "status": "success",
-            "folder_key": folder_key,
-            "total_items": len(files),
-            "files": files[:10],
-            "raw_response_type": str(type(content))
+            "response_type": str(type(response)),
+            "response": str(response)[:1000]
         }
     except Exception as e:
-        import traceback
-        return {
-            "status": "error", 
-            "message": str(e),
-            "traceback": traceback.format_exc()[:500]
-        }
+        return {"status": "error", "message": str(e)}
+
+@app.get("/test-mediafire-http")
+async def test_mediafire_http():
+    """HTTP API দিয়ে টেস্ট"""
+    try:
+        # প্রথমে সেশন টোকেন নিন
+        async with httpx.AsyncClient() as client:
+            # লগইন
+            login_response = await client.post(
+                "https://www.mediafire.com/api/user/get_session_token.php",
+                data={
+                    "email": MEDIAFIRE_EMAIL,
+                    "password": MEDIAFIRE_PASSWORD,
+                    "application_id": "42511",
+                    "response_format": "json"
+                }
+            )
+            
+            if login_response.status_code == 200:
+                data = login_response.json()
+                session_token = data.get("response", {}).get("session_token")
+                
+                if session_token:
+                    # ফোল্ডার কন্টেন্ট নিন
+                    folder_response = await client.get(
+                        "https://www.mediafire.com/api/folder/get_content.php",
+                        params={
+                            "session_token": session_token,
+                            "response_format": "json"
+                        }
+                    )
+                    
+                    return {
+                        "status": "success",
+                        "session_token": session_token[:20] + "...",
+                        "folder_content": folder_response.json()
+                    }
+            
+            return {"status": "error", "response": login_response.text}
+            
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/test-mediafire")
 async def test_mediafire():
     try:
