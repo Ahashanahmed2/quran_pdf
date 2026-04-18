@@ -719,6 +719,12 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
+
+    import sys
+    print("🔧 setup_bot() started", flush=True)
+    sys.stdout.flush()
+    
+    # বাকি কোড...
     global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
     
     telegram_worker_task = asyncio.create_task(telegram_worker())
