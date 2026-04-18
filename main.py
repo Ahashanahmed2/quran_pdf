@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form (Requests Library - Working on Render)
+FastAPI + HTML Form with Live Progress Bar
 """
 
 import os
@@ -120,9 +120,9 @@ async def load_checkpoint(folder_key):
         pass
     return {"processed": [], "current": None, "last_page": 0, "last_page_map": {}}
 
-# ============ PDF ডাউনলোড (requests ব্যবহার করে) ============
+# ============ PDF ডাউনলোড ============
 def download_pdf_stream(url):
-    """requests ব্যবহার করে PDF ডাউনলোড করুন (সিঙ্ক্রোনাস)"""
+    """requests ব্যবহার করে PDF ডাউনলোড করুন"""
     print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
     
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
@@ -214,7 +214,6 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
 
     print(f"[INFO] Downloading: {pdf['name']}", flush=True)
     try:
-        # 🔥 requests ব্যবহার করে ডাউনলোড (await নেই)
         pdf_path = download_pdf_stream(pdf['download_link'])
     except Exception as e:
         print(f"[ERROR] Download failed: {e}", flush=True)
@@ -317,6 +316,12 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 checkpoint['processed'] = list(set(checkpoint.get('processed', []) + [pdf_name]))
                 await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
                 print(f"[INFO] Completed: {pdf_name} ({total_pages} pages)", flush=True)
+                
+                # 🔥 টাস্ক স্ট্যাটাস আপডেট
+                async with running_tasks_lock:
+                    if task_id in running_tasks:
+                        running_tasks[task_id]["completed_pdfs"] = len(processed)
+                        running_tasks[task_id]["current_pdf"] = None
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
                 traceback.print_exc()
@@ -328,6 +333,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
             if task_id in running_tasks:
                 running_tasks[task_id]["status"] = "completed"
                 running_tasks[task_id]["completed_at"] = time.time()
+                running_tasks[task_id]["completed_pdfs"] = len(processed)
     except Exception as e:
         print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
@@ -336,7 +342,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)
 
-# ============ HTML টেমপ্লেট ============
+# ============ HTML টেমপ্লেট (প্রগ্রেস বার সহ) ============
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="bn">
@@ -410,6 +416,21 @@ HTML_TEMPLATE = """
         .status-running { background: #fff3cd; color: #856404; }
         .status-completed { background: #d4edda; color: #155724; }
         .status-failed { background: #f8d7da; color: #721c24; }
+        .progress-bar-container {
+            background: #e9ecef; height: 25px; border-radius: 15px;
+            margin: 10px 0; overflow: hidden;
+        }
+        .progress-bar {
+            background: linear-gradient(135deg, #1a5f7a, #0d3b4c);
+            height: 25px; border-radius: 15px; text-align: center;
+            color: white; font-size: 13px; line-height: 25px;
+            transition: width 0.5s;
+            width: 0%;
+        }
+        .task-card {
+            background: #f8f9fa; padding: 15px; margin-bottom: 15px;
+            border-radius: 10px; border-left: 4px solid #1a5f7a;
+        }
     </style>
 </head>
 <body>
@@ -420,7 +441,7 @@ HTML_TEMPLATE = """
         <div class="info-box">
             <h3>📋 ব্যবহার নির্দেশিকা</h3>
             <ul>
-                <li>প্রথম লাইনে বইয়ের নাম লিখুন (ইংরেজি বা বাংলা)</li>
+                <li>প্রথম লাইনে বইয়ের নাম লিখুন</li>
                 <li>তারপর প্রতি লাইনে একটি করে PDF লিংক দিন</li>
             </ul>
         </div>
@@ -448,8 +469,12 @@ https://archive.org/download/20260415_20260415_0945/1.pdf"></textarea>
 
         <div id="result" class="result"></div>
         
-        <div style="margin-top: 20px;">
-            <h3>📊 চলমান টাস্ক</h3>
+        <div style="margin-top: 25px;">
+            <h3>📊 চলমান টাস্ক 
+                <span style="font-size: 14px; margin-left: 10px;">
+                    <a href="#" onclick="loadTasks(); return false;" style="color: #1a5f7a;">🔄 রিফ্রেশ</a>
+                </span>
+            </h3>
             <div id="tasksList">লোড হচ্ছে...</div>
         </div>
     </div>
@@ -460,25 +485,71 @@ https://archive.org/download/20260415_20260415_0945/1.pdf"></textarea>
                 const response = await fetch('/tasks');
                 const tasks = await response.json();
                 const tasksDiv = document.getElementById('tasksList');
+                
                 if (Object.keys(tasks).length === 0) {
-                    tasksDiv.innerHTML = '<p>কোনো চলমান টাস্ক নেই</p>';
+                    tasksDiv.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">কোনো চলমান টাস্ক নেই</p>';
                 } else {
                     let html = '';
                     for (const [id, task] of Object.entries(tasks)) {
                         const statusClass = task.status === 'running' ? 'status-running' : 
                                           (task.status === 'completed' ? 'status-completed' : 'status-failed');
-                        html += `<div style="background: #f8f9fa; padding: 10px; margin-bottom: 10px; border-radius: 8px;">`;
-                        html += `<strong>${id}</strong> <span class="status-badge ${statusClass}">${task.status}</span><br>`;
-                        html += `শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}`;
-                        if (task.completed_at) {
-                            html += `<br>সমাপ্ত: ${new Date(task.completed_at * 1000).toLocaleString('bn-BD')}`;
+                        
+                        html += `<div class="task-card">`;
+                        html += `<div style="display: flex; justify-content: space-between; align-items: center;">
+                            <strong style="font-size: 14px;">🆔 ${id}</strong>
+                            <span class="status-badge ${statusClass}">${task.status}</span>
+                        </div>`;
+                        
+                        html += `<div style="margin-top: 8px;">`;
+                        html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
+                        html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
+                        
+                        if (task.total_pdfs) {
+                            const completed = task.completed_pdfs || 0;
+                            const percent = task.total_pdfs > 0 ? Math.round(completed * 100 / task.total_pdfs) : 0;
+                            
+                            html += `<div style="margin-top: 10px;">`;
+                            html += `📊 <strong>অগ্রগতি:</strong> ${completed} / ${task.total_pdfs} PDF সম্পন্ন<br>`;
+                            html += `<div class="progress-bar-container">
+                                <div class="progress-bar" style="width: ${percent}%;">${percent}%</div>
+                            </div>`;
+                            
+                            if (task.current_pdf) {
+                                html += `🔄 <strong>চলমান:</strong> ${task.current_pdf}<br>`;
+                            }
+                            
+                            // আনুমানিক সময়
+                            if (completed > 0 && task.started_at) {
+                                const elapsed = Date.now()/1000 - task.started_at;
+                                const avgTimePerPdf = elapsed / completed;
+                                const remainingPdfs = task.total_pdfs - completed;
+                                const remainingSeconds = avgTimePerPdf * remainingPdfs;
+                                
+                                const hours = Math.floor(remainingSeconds / 3600);
+                                const minutes = Math.floor((remainingSeconds % 3600) / 60);
+                                
+                                if (hours > 0 || minutes > 0) {
+                                    html += `⏱️ <strong>আনুমানিক বাকি:</strong> `;
+                                    if (hours > 0) html += `${hours} ঘন্টা `;
+                                    html += `${minutes} মিনিট<br>`;
+                                }
+                            }
+                            html += `</div>`;
                         }
-                        html += `</div>`;
+                        
+                        if (task.completed_at) {
+                            html += `<br>✅ সমাপ্ত: ${new Date(task.completed_at * 1000).toLocaleString('bn-BD')}`;
+                        }
+                        if (task.error) {
+                            html += `<br>❌ ত্রুটি: ${task.error}`;
+                        }
+                        
+                        html += `</div></div>`;
                     }
                     tasksDiv.innerHTML = html;
                 }
             } catch (e) {
-                document.getElementById('tasksList').innerHTML = '<p>টাস্ক লোড করতে ব্যর্থ</p>';
+                document.getElementById('tasksList').innerHTML = '<p style="color: red;">টাস্ক লোড করতে ব্যর্থ</p>';
             }
         }
 
@@ -523,7 +594,7 @@ https://archive.org/download/20260415_20260415_0945/1.pdf`;
             let html = `<strong>📚 বই:</strong> ${bookName}<br>`;
             html += `<strong>📄 PDF সংখ্যা:</strong> ${urls.length}<br><br>`;
             html += `<strong>লিংকসমূহ:</strong><br>`;
-            urls.slice(0, 5).forEach(url => html += `• ${url}<br>`);
+            urls.slice(0, 5).forEach(url => html += `• ${url.substring(0, 60)}...<br>`);
             if (urls.length > 5) html += `... এবং আরো ${urls.length - 5}টি<br>`;
             
             resultDiv.className = 'result success';
@@ -568,8 +639,7 @@ https://archive.org/download/20260415_20260415_0945/1.pdf`;
                     resultDiv.innerHTML = `✅ প্রসেসিং শুরু হয়েছে!<br>
                         📁 বই: ${bookName}<br>
                         📄 PDF সংখ্যা: ${urls.length}<br>
-                        🆔 টাস্ক ID: ${data.task_id}<br><br>
-                        <a href="#" onclick="loadTasks(); return false;">টাস্ক স্ট্যাটাস রিফ্রেশ করুন</a>`;
+                        🆔 টাস্ক ID: ${data.task_id}`;
                     loadTasks();
                 } else {
                     resultDiv.className = 'result error';
@@ -577,12 +647,13 @@ https://archive.org/download/20260415_20260415_0945/1.pdf`;
                 }
             } catch (err) {
                 resultDiv.className = 'result error';
-                resultDiv.innerHTML = `❌ সংযোগ ত্রুটি: ${err.message}`;
+                resultDiv.innerHTML = `❌ সংযোগ ত্রুটি`;
             }
         });
 
+        // প্রতি ১০ সেকেন্ডে রিফ্রেশ
         loadTasks();
-        setInterval(loadTasks, 5000);
+        setInterval(loadTasks, 10000);
     </script>
 </body>
 </html>
@@ -592,6 +663,7 @@ https://archive.org/download/20260415_20260415_0945/1.pdf`;
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
+    global shutdown_in_progress
     shutdown_in_progress = True
 
 app = FastAPI(lifespan=lifespan)
@@ -606,30 +678,23 @@ async def health():
 
 @app.get("/test-process")
 async def test_process():
-    """প্রসেসিং টেস্ট করুন - requests ব্যবহার করে"""
     try:
         url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
-        print(f"[TEST] Downloading: {url}", flush=True)
-        
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         response = requests.get(url, stream=True, timeout=60)
-        
         total = 0
         for chunk in response.iter_content(chunk_size=8192):
             if chunk:
                 temp_file.write(chunk)
                 total += len(chunk)
         temp_file.close()
-        
         os.unlink(temp_file.name)
-        
         return {"status": "success", "downloaded_bytes": total}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @app.post("/process")
 async def process_form(request: Request):
-    """ফর্ম থেকে ডাটা নিয়ে প্রসেসিং শুরু করুন"""
     try:
         data = await request.json()
         book_name = data.get('book_name', f"tafsir_{int(time.time())}")
@@ -657,7 +722,14 @@ async def process_form(request: Request):
         
         task_id = f"web_{int(time.time())}"
         async with running_tasks_lock:
-            running_tasks[task_id] = {"status": "running", "started_at": time.time()}
+            running_tasks[task_id] = {
+                "status": "running",
+                "started_at": time.time(),
+                "folder_name": book_name,
+                "total_pdfs": len(pdf_urls),
+                "completed_pdfs": 0,
+                "current_pdf": None
+            }
         async with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
         
@@ -667,7 +739,6 @@ async def process_form(request: Request):
             daemon=True
         )
         thread.start()
-        print(f"[DEBUG] Thread started for task {task_id}", flush=True)
         
         return {
             "status": "started",
@@ -677,14 +748,32 @@ async def process_form(request: Request):
             "pdf_count": len(pdf_urls)
         }
     except Exception as e:
-        print(f"[ERROR] /process: {e}", flush=True)
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
 @app.get("/tasks")
 async def get_tasks():
     async with running_tasks_lock:
-        return {k: v for k, v in running_tasks.items()}
+        tasks_copy = {}
+        for task_id, task_info in running_tasks.items():
+            task_copy = task_info.copy()
+            
+            if task_info.get("folder_name"):
+                clean_name = task_info["folder_name"].replace(' ', '_')
+                checkpoint = await load_checkpoint(f"direct_{clean_name}")
+                
+                processed = checkpoint.get('processed', [])
+                current = checkpoint.get('current')
+                
+                task_copy["completed_pdfs"] = len(processed)
+                task_copy["current_pdf"] = current
+                
+                if task_copy["total_pdfs"] > 0:
+                    task_copy["percent"] = round(len(processed) * 100 / task_copy["total_pdfs"], 1)
+            
+            tasks_copy[task_id] = task_copy
+        
+        return tasks_copy
 
 @app.post("/cancel/{task_id}")
 async def cancel_task(task_id: str):
