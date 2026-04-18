@@ -725,6 +725,8 @@ async def tg_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Telegram Bot Setup ============
 async def setup_bot():
+# ============ Telegram Bot Setup ============
+async def setup_bot():
     global application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
     global _bot_initialized, _updater_started
 
@@ -742,6 +744,18 @@ async def setup_bot():
         if not TELEGRAM_BOT_TOKEN:
             print("⚠️ TELEGRAM_BOT_TOKEN সেট করা নেই।")
             return
+
+        # ✅ CRITICAL: আগের সব সেশন ক্লিয়ার করুন
+        try:
+            from telegram import Bot
+            temp_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            # Webhook ডিলিট এবং সব পেন্ডিং আপডেট বাদ দিন
+            await temp_bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(2)  # টেলিগ্রামকে আপডেট হতে সময় দিন
+            await temp_bot.close()
+            print("✅ আগের সব বট সেশন ক্লিয়ার করা হয়েছে")
+        except Exception as e:
+            print(f"⚠️ সেশন ক্লিয়ার করতে সমস্যা: {e}")
 
         # আগের ইনস্ট্যান্স থাকলে ক্লিনআপ
         if application is not None:
@@ -766,14 +780,7 @@ async def setup_bot():
 
         # শুধুমাত্র একবার polling শুরু করার ব্যবস্থা
         if not _updater_started:
-            # পুরনো webhook রিমুভ করে polling শুরু
-            try:
-                await application.bot.delete_webhook(drop_pending_updates=True)
-                await asyncio.sleep(1)  # টেলিগ্রামকে আপডেট হতে সময় দিন
-            except Exception as e:
-                print(f"Webhook ডিলিট করতে সমস্যা: {e}")
-
-            # Polling শুরু (non-blocking)
+            # Polling শুরু (non-blocking) - drop_pending_updates True
             asyncio.create_task(application.updater.start_polling(
                 poll_interval=1.0,
                 timeout=30,
@@ -785,7 +792,6 @@ async def setup_bot():
             print("⚠️ Polling আগেই চলছে, আবার শুরু করা হয়নি")
 
         _bot_initialized = True
-
 
 async def shutdown_bot():
     global shutdown_in_progress, application, telegram_worker_task, checkpoint_writer_task, disk_cleanup_task
