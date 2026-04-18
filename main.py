@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form with Live Progress Bar (urllib download fix)
+FastAPI + HTML Form with Live Page-by-Page Progress
 """
 
 import os
@@ -53,7 +53,7 @@ page_hash_cache = OrderedDict()
 page_hash_cache_lock = asyncio.Lock()
 shutdown_in_progress = False
 
-# SSL কনটেক্সট (সার্টিফিকেট ভেরিফিকেশন বন্ধ)
+# SSL কনটেক্সট
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
@@ -64,7 +64,6 @@ class ProcessRequest(BaseModel):
 
 # ============ Threading Helper ============
 def run_async_in_thread(coro, *args):
-    """একটি আলাদা থ্রেডে async ফাংশন রান করুন"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -127,24 +126,20 @@ async def load_checkpoint(folder_key):
         pass
     return {"processed": [], "current": None, "last_page": 0, "last_page_map": {}}
 
-# ============ PDF ডাউনলোড (urllib ব্যবহার করে - ফিক্সড) ============
+# ============ PDF ডাউনলোড ============
 def download_pdf_stream(url):
-    """urllib ব্যবহার করে PDF ডাউনলোড করুন (Render-এ কাজ করে)"""
     print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
     
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/pdf,application/octet-stream,*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://archive.org/',
-            'Connection': 'keep-alive'
+            'Referer': 'https://archive.org/'
         }
         
         req = urllib.request.Request(url, headers=headers)
         
-        # 🔥 urllib দিয়ে ডাউনলোড (SSL ভেরিফিকেশন বন্ধ)
         with urllib.request.urlopen(req, context=ssl_context, timeout=300) as response:
             total_size = 0
             while True:
@@ -159,17 +154,8 @@ def download_pdf_stream(url):
         temp_file.close()
         return temp_file.name
         
-    except urllib.error.URLError as e:
-        print(f"[DEBUG] URL Error: {e}", flush=True)
-        temp_file.close()
-        try:
-            os.unlink(temp_file.name)
-        except:
-            pass
-        raise e
     except Exception as e:
         print(f"[DEBUG] Download error: {e}", flush=True)
-        traceback.print_exc()
         temp_file.close()
         try:
             os.unlink(temp_file.name)
@@ -222,7 +208,7 @@ async def is_task_cancelled(task_id):
     async with task_controls_lock:
         return task_controls.get(task_id, {}).get("cancel", False)
 
-async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, task_id):
+async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, task_id, pdf_index, total_pdfs):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
     print(f"[INFO] Processing: {pdf['name']} -> {full_hf_path}", flush=True)
@@ -246,6 +232,14 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         print(f"[INFO] {pdf['name']}: {total_pages} pages", flush=True)
+        
+        # 🔥 টাস্ক স্ট্যাটাস আপডেট - মোট পৃষ্ঠা
+        async with running_tasks_lock:
+            if task_id in running_tasks:
+                running_tasks[task_id]["current_pdf"] = pdf['name']
+                running_tasks[task_id]["current_pdf_index"] = pdf_index
+                running_tasks[task_id]["current_pdf_total_pages"] = total_pages
+                running_tasks[task_id]["current_page"] = start_page
 
         pages_processed = 0
         for page_num in range(start_page, total_pages):
@@ -280,7 +274,12 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
             except Exception as e:
                 print(f"[ERROR] Upload failed page {page_num+1}: {e}", flush=True)
 
-            if page_num % 50 == 0:
+            # 🔥 প্রতিটি পৃষ্ঠায় টাস্ক স্ট্যাটাস আপডেট
+            async with running_tasks_lock:
+                if task_id in running_tasks:
+                    running_tasks[task_id]["current_page"] = page_num + 1
+
+            if page_num % 10 == 0:
                 checkpoint['current'] = pdf['name']
                 checkpoint['last_page'] = page_num
                 await async_save_checkpoint(folder_key, checkpoint)
@@ -327,14 +326,9 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
             pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
             print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
 
-            # 🔥 টাস্ক স্ট্যাটাস আপডেট - চলমান PDF
-            async with running_tasks_lock:
-                if task_id in running_tasks:
-                    running_tasks[task_id]["current_pdf"] = pdf_name
-
             try:
                 pages_processed, total_pages, cancelled = await process_single_pdf(
-                    pdf, clean_folder_name, f"direct_{clean_folder_name}", checkpoint, task_id
+                    pdf, clean_folder_name, f"direct_{clean_folder_name}", checkpoint, task_id, idx+1, len(pdf_urls)
                 )
                 if cancelled:
                     break
@@ -344,11 +338,12 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
                 print(f"[INFO] Completed: {pdf_name} ({total_pages} pages)", flush=True)
                 
-                # 🔥 টাস্ক স্ট্যাটাস আপডেট - সম্পন্ন PDF
+                # 🔥 টাস্ক স্ট্যাটাস আপডেট
                 async with running_tasks_lock:
                     if task_id in running_tasks:
                         running_tasks[task_id]["completed_pdfs"] = len(processed)
                         running_tasks[task_id]["current_pdf"] = None
+                        running_tasks[task_id]["current_page"] = 0
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
                 traceback.print_exc()
@@ -369,7 +364,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)
 
-# ============ HTML টেমপ্লেট (প্রগ্রেস বার সহ) ============
+# ============ HTML টেমপ্লেট (লাইভ পৃষ্ঠা প্রগ্রেস সহ) ============
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="bn">
@@ -386,7 +381,7 @@ HTML_TEMPLATE = """
             padding: 20px;
         }
         .container {
-            max-width: 900px;
+            max-width: 950px;
             margin: 0 auto;
             background: white;
             border-radius: 20px;
@@ -399,7 +394,7 @@ HTML_TEMPLATE = """
         label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
         textarea {
             width: 100%; padding: 12px 15px; border: 2px solid #ddd;
-            border-radius: 10px; font-size: 14px; min-height: 200px;
+            border-radius: 10px; font-size: 14px; min-height: 180px;
             font-family: monospace;
         }
         textarea:focus { outline: none; border-color: #1a5f7a; }
@@ -428,8 +423,6 @@ HTML_TEMPLATE = """
             background: #e7f3ff; border: 1px solid #b8daff;
             border-radius: 10px; padding: 15px; margin-bottom: 20px;
         }
-        .info-box h3 { color: #004085; margin-bottom: 10px; }
-        .info-box ul { margin-left: 20px; color: #004085; }
         .quick-buttons { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
         .quick-btn {
             background: #e9ecef; border: 1px solid #ced4da;
@@ -445,18 +438,29 @@ HTML_TEMPLATE = """
         .status-failed { background: #f8d7da; color: #721c24; }
         .progress-bar-container {
             background: #e9ecef; height: 25px; border-radius: 15px;
-            margin: 10px 0; overflow: hidden;
+            margin: 8px 0; overflow: hidden;
         }
         .progress-bar {
             background: linear-gradient(135deg, #1a5f7a, #0d3b4c);
             height: 25px; border-radius: 15px; text-align: center;
             color: white; font-size: 13px; line-height: 25px;
-            transition: width 0.5s;
+            transition: width 0.3s;
+            width: 0%;
+        }
+        .progress-bar-page {
+            background: linear-gradient(135deg, #28a745, #20c997);
+            height: 20px; border-radius: 10px; text-align: center;
+            color: white; font-size: 11px; line-height: 20px;
+            transition: width 0.3s;
             width: 0%;
         }
         .task-card {
             background: #f8f9fa; padding: 15px; margin-bottom: 15px;
             border-radius: 10px; border-left: 4px solid #1a5f7a;
+        }
+        .page-progress {
+            margin-top: 10px; padding: 10px; background: white;
+            border-radius: 8px; border: 1px solid #dee2e6;
         }
     </style>
 </head>
@@ -536,13 +540,24 @@ https://archive.org/download/20260415_20260415_0945/1.pdf"></textarea>
                             const percent = task.total_pdfs > 0 ? Math.round(completed * 100 / task.total_pdfs) : 0;
                             
                             html += `<div style="margin-top: 10px;">`;
-                            html += `📊 <strong>অগ্রগতি:</strong> ${completed} / ${task.total_pdfs} PDF সম্পন্ন<br>`;
+                            html += `📊 <strong>PDF অগ্রগতি:</strong> ${completed} / ${task.total_pdfs} সম্পন্ন<br>`;
                             html += `<div class="progress-bar-container">
                                 <div class="progress-bar" style="width: ${percent}%;">${percent}%</div>
                             </div>`;
                             
+                            // 🔥 পৃষ্ঠা প্রগ্রেস
                             if (task.current_pdf) {
-                                html += `🔄 <strong>চলমান:</strong> ${task.current_pdf}<br>`;
+                                const currentPage = task.current_page || 0;
+                                const totalPages = task.current_pdf_total_pages || 0;
+                                const pagePercent = totalPages > 0 ? Math.round(currentPage * 100 / totalPages) : 0;
+                                
+                                html += `<div class="page-progress">`;
+                                html += `🔄 <strong>চলমান:</strong> ${task.current_pdf} (${task.current_pdf_index}/${task.total_pdfs})<br>`;
+                                html += `📄 <strong>পৃষ্ঠা:</strong> ${currentPage} / ${totalPages}<br>`;
+                                html += `<div class="progress-bar-container" style="height: 20px;">
+                                    <div class="progress-bar-page" style="width: ${pagePercent}%;">${pagePercent}%</div>
+                                </div>`;
+                                html += `</div>`;
                             }
                             
                             // আনুমানিক সময়
@@ -556,9 +571,9 @@ https://archive.org/download/20260415_20260415_0945/1.pdf"></textarea>
                                 const minutes = Math.floor((remainingSeconds % 3600) / 60);
                                 
                                 if (hours > 0 || minutes > 0) {
-                                    html += `⏱️ <strong>আনুমানিক বাকি:</strong> `;
+                                    html += `<br>⏱️ <strong>আনুমানিক বাকি:</strong> `;
                                     if (hours > 0) html += `${hours} ঘন্টা `;
-                                    html += `${minutes} মিনিট<br>`;
+                                    html += `${minutes} মিনিট`;
                                 }
                             }
                             html += `</div>`;
@@ -619,10 +634,7 @@ https://archive.org/download/20260415_20260415_0945/1.pdf`;
             const urls = lines.slice(1).filter(l => l.startsWith('http'));
             
             let html = `<strong>📚 বই:</strong> ${bookName}<br>`;
-            html += `<strong>📄 PDF সংখ্যা:</strong> ${urls.length}<br><br>`;
-            html += `<strong>লিংকসমূহ:</strong><br>`;
-            urls.slice(0, 5).forEach(url => html += `• ${url.substring(0, 60)}...<br>`);
-            if (urls.length > 5) html += `... এবং আরো ${urls.length - 5}টি<br>`;
+            html += `<strong>📄 PDF সংখ্যা:</strong> ${urls.length}<br>`;
             
             resultDiv.className = 'result success';
             resultDiv.innerHTML = html;
@@ -678,9 +690,8 @@ https://archive.org/download/20260415_20260415_0945/1.pdf`;
             }
         });
 
-        // প্রতি ১০ সেকেন্ডে রিফ্রেশ
         loadTasks();
-        setInterval(loadTasks, 10000);
+        setInterval(loadTasks, 5000); // প্রতি ৫ সেকেন্ডে রিফ্রেশ
     </script>
 </body>
 </html>
@@ -705,11 +716,8 @@ async def health():
 
 @app.get("/test-download")
 async def test_download():
-    """urllib দিয়ে ডাউনলোড টেস্ট"""
     try:
         url = "https://archive.org/download/20260415_20260415_0945/1.pdf"
-        print(f"[TEST] Downloading: {url}", flush=True)
-        
         headers = {'User-Agent': 'Mozilla/5.0'}
         req = urllib.request.Request(url, headers=headers)
         
@@ -755,7 +763,10 @@ async def process_form(request: Request):
                 "folder_name": book_name,
                 "total_pdfs": len(pdf_urls),
                 "completed_pdfs": 0,
-                "current_pdf": None
+                "current_pdf": None,
+                "current_pdf_index": 0,
+                "current_pdf_total_pages": 0,
+                "current_page": 0
             }
         async with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
@@ -792,19 +803,32 @@ async def get_tasks():
                 
                 processed = checkpoint.get('processed', [])
                 current = checkpoint.get('current')
+                last_page = checkpoint.get('last_page', 0)
                 
                 task_copy["completed_pdfs"] = len(processed)
-                task_copy["current_pdf"] = current
                 
                 if task_copy["total_pdfs"] > 0:
                     task_copy["percent"] = round(len(processed) * 100 / task_copy["total_pdfs"], 1)
+                
+                # চেকপয়েন্ট থেকে বর্তমান পৃষ্ঠা আপডেট
+                if current and last_page > 0:
+                    task_copy["current_pdf"] = current
+                    task_copy["current_page"] = last_page
             
             tasks_copy[task_id] = task_copy
         
         return tasks_copy
 
+@app.get("/cancel/{task_id}")
+async def cancel_task_get(task_id: str):
+    async with task_controls_lock:
+        if task_id in task_controls:
+            task_controls[task_id]["cancel"] = True
+            return {"status": "cancelled"}
+    return {"status": "not found"}
+
 @app.post("/cancel/{task_id}")
-async def cancel_task(task_id: str):
+async def cancel_task_post(task_id: str):
     async with task_controls_lock:
         if task_id in task_controls:
             task_controls[task_id]["cancel"] = True
