@@ -220,7 +220,7 @@ async def send_telegram_safe(chat_id, message):
             if response.status_code == 200:
                 return True
             elif response.status_code == 429:
-                wait_time = 2 ** retry
+                wait_time = 5 * (2 ** retry)
                 await asyncio.sleep(wait_time)
             else:
                 await asyncio.sleep(1)
@@ -264,7 +264,8 @@ async def send_telegram(chat_id, message):
     except Exception as e:
         print(f"[Telegram] Queue error: {e}", flush=True)
 
-async def throttled_send(chat_id, message, interval=2):
+# throttled_send ফাংশনে interval পরিবর্তন করুন
+async def throttled_send(chat_id, message, interval=1.5):  # আগে ছিল 2, এখন 1.5
     async with telegram_lock:
         now = time.time()
         last_time = last_telegram_sent.get(chat_id, 0)
@@ -272,8 +273,12 @@ async def throttled_send(chat_id, message, interval=2):
             await send_telegram(chat_id, message)
             last_telegram_sent[chat_id] = now
             return True
-        return False
-
+        else:
+            # অপেক্ষা করুন
+            await asyncio.sleep(interval - (now - last_time))
+            await send_telegram(chat_id, message)
+            last_telegram_sent[chat_id] = time.time()
+            return True
 # ============ Internet Archive: আইটেম থেকে PDF লিংক বের করা ============
 async def extract_pdfs_from_archive_item(item_url: str, max_pdfs: int = 30):
     """Internet Archive আইটেম পেজ থেকে সব PDF লিংক বের করুন"""
