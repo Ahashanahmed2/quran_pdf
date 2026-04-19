@@ -588,6 +588,72 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
                 traceback.print_exc()
+def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
+    print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
+    print(f"[DEBUG] Folder: {folder_name}", flush=True)
+    print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
+
+    try:
+        clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
+
+        print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
+        hf_progress = get_hf_folder_progress(clean_folder_name)
+
+        if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
+            print(f"[INFO] 📁 Folder already exists on HF with {hf_progress['total_uploaded']} PDF folders", flush=True)
+
+        hf_processed = set(hf_progress.get("uploaded_pdfs", []))
+        uploaded_pages = hf_progress.get("uploaded_pages", {})
+        processed_count = 0
+
+        update_task_progress(
+            task_id,
+            completed_pdfs=0,
+            memory_usage=get_memory_usage(),
+            system_memory=get_system_memory()
+        )
+
+        for idx, url in enumerate(pdf_urls):
+            if shutdown_in_progress or is_task_cancelled(task_id):
+                break
+
+            name_match = re.search(r'/(\d+)\.pdf', url)
+            pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
+            pdf_name = f"{pdf_number}.pdf"
+
+            # 🔥 FIX: HF-এ ফোল্ডার থাকলেও স্কিপ করবে না, চেক করতে পাঠাবে
+            if str(pdf_number) in hf_processed:
+                pages_uploaded = uploaded_pages.get(str(pdf_number), set())
+                print(f"[INFO] PDF {pdf_number} has {len(pages_uploaded)} pages uploaded, will check for missing pages", flush=True)
+
+            pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
+            print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
+
+            try:
+                pages_processed, cancelled = process_single_pdf_sync(
+                    pdf, clean_folder_name, task_id, idx+1, len(pdf_urls), uploaded_pages
+                )
+                if cancelled:
+                    break
+
+                processed_count += 1
+                print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
+
+                update_task_progress(
+                    task_id,
+                    completed_pdfs=processed_count,
+                    current_pdf=None,
+                    current_page=0,
+                    memory_usage=get_memory_usage()
+                )
+
+                if idx < len(pdf_urls) - 1:
+                    sleep_time = PDF_SLEEP_BETWEEN + random.uniform(0, 1)
+                    time.sleep(sleep_time)
+
+            except Exception as e:
+                print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
+                traceback.print_exc()
                 continue
 
         print(f"[INFO] 🎉 Completed {processed_count} PDFs!", flush=True)
