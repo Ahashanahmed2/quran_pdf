@@ -749,16 +749,16 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `<div style="margin-top: 8px;">`;
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
-                          // ✅ মেমরি বার - সবসময় দেখানোর জন্য
-                const memUsage = task.memory_usage || 0;
-                const sysMem = task.system_memory || { total: 525, percent: 0, available: 0 };
-                const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
+                        // ✅ মেমরি বার - সবসময় দেখানোর জন্য
+                        const memUsage = task.memory_usage || 0;
+                        const sysMem = task.system_memory || { total: 525, percent: 0, available: 0 };
+                        const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
                 
-                let memColor = '#00d2ff';
-                let warningBadge = '';
-                if (memPercent > 85) {
-                    memColor = '#dc3545';
-                    warningBadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
+                        let memColor = '#00d2ff';
+                        let warningBadge = '';
+                        if (memPercent > 85) {
+                            warningBadge = '#dc3545';
+                warningBadgeadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
                 } else if (memPercent > 70) {
                     memColor = '#ff9800';
                     warningBadge = '<span class="memory-warning">⚠️ সতর্কতা</span>';
