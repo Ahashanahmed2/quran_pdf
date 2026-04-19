@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form with HF Folder Check + Resume Support
+FastAPI + HTML Form with Live Progress + Bulk Upload + Background Task Fix
 """
 
 import os
@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from concurrent.futures import ThreadPoolExecutor
 import fitz  # PyMuPDF
 from huggingface_hub import HfApi, upload_file
 
@@ -58,17 +59,8 @@ class ProcessRequest(BaseModel):
     book_name: str
     urls: list
 
-# ============ Threading Helper ============
-def run_async_in_thread(coro, *args):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(coro(*args))
-    except Exception as e:
-        print(f"[Thread] Error: {e}", flush=True)
-        traceback.print_exc()
-    finally:
-        loop.close()
+# ============ Threading Helper (Render-এ কাজ করে না, তাই ব্যবহার করব না) ============
+# def run_async_in_thread(coro, *args): ... # 🔥 রিমুভ করা হয়েছে
 
 # ============ Disk Space Check ============
 async def check_disk_space():
@@ -135,7 +127,6 @@ def get_hf_folder_progress(hf_path: str) -> dict:
         for file in files:
             parts = file.rfilename.split('/')
             if len(parts) >= 2:
-                # parts[0] = ফোল্ডার নাম, parts[1] = PDF নম্বর
                 folder_name = parts[1] if parts[0] == hf_path else parts[0]
                 if folder_name.isdigit():
                     pdf_folders.add(folder_name)
@@ -186,11 +177,11 @@ def download_pdf_stream(url):
             pass
         raise e
 
-# ============ বাল্ক ফোল্ডার আপলোড ============
+# ============ বাল্ক ফোল্ডার আপলোড (Fallback সহ) ============
 def upload_folder_to_hf(local_folder: str, hf_path: str):
-    """সম্পূর্ণ ফোল্ডার একসাথে HF-এ আপলোড করুন"""
+    """ফোল্ডার আপলোড - upload_file fallback সহ"""
     try:
-        png_files = list(Path(local_folder).glob("*.png"))
+        png_files = sorted(Path(local_folder).glob("*.png"))
         file_count = len(png_files)
         print(f"[INFO] Uploading {file_count} images to: {hf_path}", flush=True)
         
@@ -199,16 +190,43 @@ def upload_folder_to_hf(local_folder: str, hf_path: str):
             return False
         
         api = HfApi(token=HF_TOKEN)
-        api.upload_folder(
-            folder_path=local_folder,
-            path_in_repo=hf_path,
-            repo_id=HF_DATASET,
-            repo_type="dataset"
-        )
         
-        print(f"[INFO] ✅ Uploaded {file_count} images", flush=True)
-        return True
-        
+        # 🔥 পদ্ধতি ১: upload_folder (কাজ নাও করতে পারে)
+        try:
+            api.upload_folder(
+                folder_path=local_folder,
+                path_in_repo=hf_path,
+                repo_id=HF_DATASET,
+                repo_type="dataset"
+            )
+            print(f"[INFO] ✅ Uploaded via upload_folder", flush=True)
+            return True
+        except Exception as e1:
+            print(f"[WARN] upload_folder failed: {e1}", flush=True)
+            print(f"[INFO] Trying fallback: individual file upload...", flush=True)
+            
+            # 🔥 পদ্ধতি ২: একটি একটি করে আপলোড (fallback) - কাজ করবে
+            success_count = 0
+            for idx, png_file in enumerate(png_files):
+                try:
+                    api.upload_file(
+                        path_or_fileobj=str(png_file),
+                        path_in_repo=f"{hf_path}/{png_file.name}",
+                        repo_id=HF_DATASET,
+                        repo_type="dataset"
+                    )
+                    success_count += 1
+                    
+                    if (idx + 1) % 50 == 0:
+                        print(f"[INFO] Uploaded {idx + 1}/{file_count} files", flush=True)
+                        time.sleep(1)  # Rate limit এড়াতে
+                        
+                except Exception as e2:
+                    print(f"[ERROR] Failed to upload {png_file.name}: {e2}", flush=True)
+            
+            print(f"[INFO] ✅ Uploaded {success_count}/{file_count} files via fallback", flush=True)
+            return success_count > 0
+            
     except Exception as e:
         print(f"[ERROR] ❌ Upload failed: {e}", flush=True)
         traceback.print_exc()
@@ -323,10 +341,8 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
     print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
 
     try:
-        # 🔥 টাইমস্ট্যাম্প ছাড়া ক্লিন ফোল্ডার নাম
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
         
-        # 🔥 HF-এ আগে থেকে ফোল্ডার আছে কিনা চেক করুন
         print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
         hf_progress = get_hf_folder_progress(clean_folder_name)
         
@@ -334,18 +350,15 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
             print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
         
-        # চেকপয়েন্ট লোড
         checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
         local_processed = set(checkpoint.get('processed', []))
         
-        # HF + লোকাল চেকপয়েন্ট কম্বাইন
         hf_processed = set(hf_progress.get("uploaded_pdfs", []))
         all_processed = local_processed.union(hf_processed)
         print(f"[INFO] Total already processed: {len(all_processed)} PDFs", flush=True)
         
         processed = list(all_processed)
         
-        # টাস্ক স্ট্যাটাস আপডেট
         async with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["completed_pdfs"] = len(processed)
@@ -358,12 +371,10 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            # 🔥 HF-এ আগে থেকেই থাকলে স্কিপ
             if str(pdf_number) in hf_processed:
                 print(f"[INFO] ⏭️ Skipping {pdf_name} (already on HF)", flush=True)
                 continue
             
-            # 🔥 লোকাল চেকপয়েন্টে থাকলে স্কিপ
             if pdf_name in local_processed:
                 print(f"[INFO] ⏭️ Skipping {pdf_name} (already processed locally)", flush=True)
                 continue
@@ -395,6 +406,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
                 traceback.print_exc()
+                # 🔥 এরর হলেও পরবর্তী PDF চালিয়ে যান
                 continue
 
         new_processed = len(processed) - len(all_processed)
@@ -739,6 +751,9 @@ https://archive.org/details/20260415_20260415_0945`;
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ব্যাকগ্রাউন্ড টাস্কের জন্য event loop সেটআপ
+    loop = asyncio.get_event_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
     yield
     global shutdown_in_progress
     shutdown_in_progress = True
@@ -759,7 +774,6 @@ async def health():
 
 @app.get("/check-folder/{folder_name}")
 async def check_folder(folder_name: str):
-    """HF-এ ফোল্ডার চেক করুন"""
     clean_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
     progress = get_hf_folder_progress(clean_name)
     return progress
@@ -807,13 +821,9 @@ async def process_form(request: Request):
         async with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
         
-        thread = threading.Thread(
-            target=run_async_in_thread,
-            args=(process_pdf_urls, pdf_urls, book_name, task_id, 0),
-            daemon=True
-        )
-        thread.start()
-        print(f"[DEBUG] Thread started for task {task_id}", flush=True)
+        # 🔥 থ্রেডিং এর পরিবর্তে asyncio.create_task ব্যবহার করুন
+        asyncio.create_task(process_pdf_urls(pdf_urls, book_name, task_id, 0))
+        print(f"[DEBUG] Background task started for {task_id}", flush=True)
         
         return {
             "status": "started",
