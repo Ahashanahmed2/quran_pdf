@@ -790,8 +790,8 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                             
                             if (task.current_pdf) {
                                 // UI JavaScript-এ পরিবর্তন:
-                                const sysMem = task.system_memory || { total: 525, percent: 0, available: 0 };
-                                const displayTotal = 525;  // Render.com ফ্রি টায়ার লিমিট
+                                const sysMem = task.system_memory || { total: 512, percent: 0, available: 0 };
+                                const displayTotal = 512;  // Render.com ফ্রি টায়ার লিমিট
                                 const memPercent = Math.round((memUsage / displayTotal) * 100);
                                 html += `<div class="page-progress">`;
                                 html += `🔄 <strong>চলমান:</strong> ${task.current_pdf} (${task.current_pdf_index}/${task.total_pdfs})<br>`;
