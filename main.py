@@ -84,7 +84,7 @@ task_controls = {}
 task_controls_lock = threading.Lock()
 shutdown_in_progress = False
 
-# 🔥 BUG FIX: টাস্ক ফাইল সংরক্ষণের জন্য
+# টাস্ক ফাইল সংরক্ষণের জন্য
 TASKS_FILE = Path("/tmp/tafsir_running_tasks.json")
 
 def save_tasks_to_file():
@@ -112,7 +112,6 @@ def load_tasks_from_file():
         print(f"[WARN] Could not load tasks from file: {e}", flush=True)
     return {}
 
-# 🔥 BUG FIX: পুরাতন টেম্প ফাইল ক্লিনআপ
 def cleanup_old_temp_files():
     """পুরোনো টেম্প ফাইল এবং ফোল্ডার ডিলিট করুন"""
     try:
@@ -121,12 +120,12 @@ def cleanup_old_temp_files():
             try:
                 if item.is_dir():
                     folder_age = current_time - item.stat().st_mtime
-                    if folder_age > 3600:  # ১ ঘন্টা
+                    if folder_age > 3600:
                         shutil.rmtree(item, ignore_errors=True)
                         print(f"[CLEANUP] Removed old folder: {item.name}", flush=True)
                 else:
                     file_age = current_time - item.stat().st_mtime
-                    if file_age > 3600:  # ১ ঘন্টা
+                    if file_age > 3600:
                         item.unlink(missing_ok=True)
             except:
                 pass
@@ -349,7 +348,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
         pdf_closed = True
         gc.collect()
         
-        # 🔥 PyMuPDF ক্যাশে সম্পূর্ণ ক্লিয়ার
         fitz.TOOLS.store_shrink(0)
         fitz.TOOLS.reset_store()
 
@@ -387,10 +385,8 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
             if shutdown_in_progress or is_task_cancelled(task_id):
                 return total_pages_processed, True
 
-            # 🔥 ব্যাচ শুরুর আগে পুরোনো টেম্প ফাইল ক্লিনআপ
             cleanup_old_temp_files()
             
-            # 🔥 মেমরি স্পাইক কমানোর জন্য
             gc.collect()
             gc.collect()
             time.sleep(1)
@@ -429,7 +425,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                     total_pages_processed += 1
                     update_task_progress(task_id, current_page=page_num + 1)
 
-                    # 🔥 অবিলম্বে মেমরি ফ্রি
                     pix = None
                     page = None
 
@@ -441,7 +436,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                     batch_doc.close()
                     batch_doc = None
 
-                # 🔥 PyMuPDF সম্পূর্ণ রিসেট
                 fitz.TOOLS.store_shrink(0)
                 fitz.TOOLS.reset_store()
                 gc.collect()
@@ -474,7 +468,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                         pass
                     batch_doc = None
 
-                # 🔥 টেম্প ফোল্ডার জোরপূর্বক ডিলিট
                 try:
                     if temp_folder.exists():
                         shutil.rmtree(temp_folder, ignore_errors=True)
@@ -484,7 +477,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 except Exception as e:
                     print(f"[WARN] Could not remove temp folder: {e}", flush=True)
 
-                # 🔥 সম্পূর্ণ মেমরি ক্লিনআপ
                 gc.collect()
                 gc.collect()
                 fitz.TOOLS.store_shrink(0)
@@ -515,7 +507,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
         except:
             pass
         
-        # 🔥 ফাইনাল ক্লিনআপ
         gc.collect()
         gc.collect()
         fitz.TOOLS.store_shrink(0)
@@ -523,71 +514,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
         cleanup_old_temp_files()
 
 
-def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
-    print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
-    print(f"[DEBUG] Folder: {folder_name}", flush=True)
-    print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
-
-    try:
-        clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
-
-        print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
-        hf_progress = get_hf_folder_progress(clean_folder_name)
-
-        if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
-            print(f"[INFO] 📁 Folder already exists on HF", flush=True)
-
-        hf_processed = set(hf_progress.get("uploaded_pdfs", []))
-        uploaded_pages = hf_progress.get("uploaded_pages", {})
-        processed_count = 0
-
-        update_task_progress(
-            task_id,
-            completed_pdfs=0,
-            memory_usage=get_memory_usage(),
-            system_memory=get_system_memory()
-        )
-
-        for idx, url in enumerate(pdf_urls):
-            if shutdown_in_progress or is_task_cancelled(task_id):
-                break
-
-            name_match = re.search(r'/(\d+)\.pdf', url)
-            pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
-            pdf_name = f"{pdf_number}.pdf"
-
-            if str(pdf_number) in hf_processed:
-                pages_uploaded = uploaded_pages.get(str(pdf_number), set())
-                print(f"[INFO] PDF {pdf_number} has {len(pages_uploaded)} pages uploaded, will check for missing pages", flush=True)
-
-            pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
-            print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
-
-            try:
-                pages_processed, cancelled = process_single_pdf_sync(
-                    pdf, clean_folder_name, task_id, idx+1, len(pdf_urls), uploaded_pages
-                )
-                if cancelled:
-                    break
-
-                processed_count += 1
-                print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
-
-                update_task_progress(
-                    task_id,
-                    completed_pdfs=processed_count,
-                    current_pdf=None,
-                    current_page=0,
-                    memory_usage=get_memory_usage()
-                )
-
-                if idx < len(pdf_urls) - 1:
-                    sleep_time = PDF_SLEEP_BETWEEN + random.uniform(0, 1)
-                    time.sleep(sleep_time)
-
-            except Exception as e:
-                print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
-                traceback.print_exc()
 def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
     print(f"[DEBUG] Folder: {folder_name}", flush=True)
@@ -621,7 +547,6 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            # 🔥 FIX: HF-এ ফোল্ডার থাকলেও স্কিপ করবে না, চেক করতে পাঠাবে
             if str(pdf_number) in hf_processed:
                 pages_uploaded = uploaded_pages.get(str(pdf_number), set())
                 print(f"[INFO] PDF {pdf_number} has {len(pages_uploaded)} pages uploaded, will check for missing pages", flush=True)
