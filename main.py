@@ -69,10 +69,10 @@ HF_DATASET = os.environ.get("HF_DATASET")
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
-MIN_FREE_SPACE_MB = 500
+MIN_FREE_SPACE_MB = 40
 PDF_SLEEP_BETWEEN = 3
-PDF_BATCH_SIZE = 50
-MAX_FILES_PER_COMMIT = 70
+PDF_BATCH_SIZE = 30
+MAX_FILES_PER_COMMIT = 31
 MAX_CONCURRENT_TASKS = 2
 # =====================================
 
@@ -370,8 +370,8 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                             continue
 
                     page = batch_doc.load_page(page_num)
-                    zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
-                    mat = fitz.Matrix(zoom, zoom)
+                    #zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
+                    #mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(dpi=300, alpha=False)
 
                     img_name = f"page_{page_num+1:04d}.png"
