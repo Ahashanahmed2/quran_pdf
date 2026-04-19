@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 FastAPI + HTML Form with HF Folder Check + Memory Monitor
-Fixed Version - Critical Bug Fixes
+Fixed Version - Memory Leak Fixed
 """
 
 import os
@@ -20,6 +20,7 @@ import urllib.request
 import urllib.error
 import ssl
 import random
+import subprocess
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -69,7 +70,7 @@ HF_DATASET = os.environ.get("HF_DATASET")
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
-MIN_FREE_SPACE_MB = 20
+MIN_FREE_SPACE_MB = 40
 PDF_SLEEP_BETWEEN = 3
 PDF_BATCH_SIZE = 25
 MAX_FILES_PER_COMMIT = 30
@@ -93,7 +94,6 @@ def save_tasks_to_file():
             tasks_to_save = {}
             for task_id, task_info in running_tasks.items():
                 task_copy = task_info.copy()
-                # থ্রেড অবজেক্ট JSON সিরিয়ালাইজ করা যায় না
                 if "thread" in task_copy:
                     del task_copy["thread"]
                 tasks_to_save[task_id] = task_copy
@@ -111,6 +111,27 @@ def load_tasks_from_file():
     except Exception as e:
         print(f"[WARN] Could not load tasks from file: {e}", flush=True)
     return {}
+
+# 🔥 BUG FIX: পুরাতন টেম্প ফাইল ক্লিনআপ
+def cleanup_old_temp_files():
+    """পুরোনো টেম্প ফাইল এবং ফোল্ডার ডিলিট করুন"""
+    try:
+        current_time = time.time()
+        for item in TEMP_DIR.iterdir():
+            try:
+                if item.is_dir():
+                    folder_age = current_time - item.stat().st_mtime
+                    if folder_age > 3600:  # ১ ঘন্টা
+                        shutil.rmtree(item, ignore_errors=True)
+                        print(f"[CLEANUP] Removed old folder: {item.name}", flush=True)
+                else:
+                    file_age = current_time - item.stat().st_mtime
+                    if file_age > 3600:  # ১ ঘন্টা
+                        item.unlink(missing_ok=True)
+            except:
+                pass
+    except Exception as e:
+        print(f"[WARN] Cleanup error: {e}", flush=True)
 
 # SSL কনটেক্সট
 ssl_context = ssl.create_default_context()
@@ -130,10 +151,8 @@ def check_disk_space():
         print(f"[Disk Check] Warning: {e}", flush=True)
         return 999999
 
-# 🔥 FIX 3: Estimate needed disk space
 def estimate_needed_space(total_pages):
     """Estimate disk space needed for batch processing"""
-    # Approximate: each page ~0.5MB at 3x zoom
     return total_pages * 0.5
 
 # ============ HF ফোল্ডার চেক ============
@@ -211,12 +230,10 @@ def download_pdf_stream(url):
             pass
         raise e
 
-# 🔥 FIX 6: Rate limiting with jitter
 def download_pdf_with_retry(url, max_retries=3):
     """PDF ডাউনলোড রিট্রাই সহ এবং rate limiting"""
     for retry in range(max_retries):
         try:
-            # Add random jitter to avoid thundering herd
             if retry > 0:
                 jitter = random.uniform(1, 3)
                 time.sleep(jitter)
@@ -293,14 +310,12 @@ def is_task_cancelled(task_id):
     with task_controls_lock:
         return task_controls.get(task_id, {}).get("cancel", False)
 
-# 🔥 FIX 7: Thread-safe task update
 def update_task_progress(task_id, **kwargs):
     """Thread-safe task progress update"""
     with running_tasks_lock:
         if task_id in running_tasks:
             for key, value in kwargs.items():
                 running_tasks[task_id][key] = value
-    # 🔥 BUG FIX: টাস্ক আপডেটের পর ফাইলেও সংরক্ষণ করুন
     save_tasks_to_file()
 
 def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pdfs, uploaded_pages=None):
@@ -324,39 +339,38 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
         return 0, False
 
     total_pages_processed = 0
-    pdf_closed = False  # 🔥 FIX 2: Track if PDF is closed
+    pdf_closed = False
 
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         doc.close()
-        doc = None  # 🔥 FIX 2: Explicitly set to None
+        doc = None
         pdf_closed = True
         gc.collect()
+        
+        # 🔥 PyMuPDF ক্যাশে সম্পূর্ণ ক্লিয়ার
+        fitz.TOOLS.store_shrink(0)
+        fitz.TOOLS.reset_store()
 
         print(f"[INFO] {pdf['name']}: {total_pages} pages [Mem: {get_memory_usage()}MB]", flush=True)
 
-        # 🔥 FIX 4: Proper resume logic
         start_page = 0
         if uploaded_pages and sub_folder in uploaded_pages:
             uploaded_set = uploaded_pages[sub_folder]
             if uploaded_set:
-                # Use max page as starting point
                 max_uploaded = max(uploaded_set)
-                # Check if all pages up to max_uploaded are present
                 all_present = all(p in uploaded_set for p in range(1, max_uploaded + 1))
                 if all_present:
                     start_page = max_uploaded
                     print(f"[INFO] 📍 Resuming from page {start_page + 1} ({len(uploaded_set)} pages already uploaded)", flush=True)
                 else:
-                    # Find first missing page
                     for p in range(1, total_pages + 1):
                         if p not in uploaded_set:
                             start_page = p - 1
                             break
                     print(f"[INFO] 📍 Partial upload detected, resuming from page {start_page + 1}", flush=True)
 
-        # 🔥 FIX 7: Thread-safe update
         update_task_progress(
             task_id,
             current_pdf=pdf['name'],
@@ -373,17 +387,23 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
             if shutdown_in_progress or is_task_cancelled(task_id):
                 return total_pages_processed, True
 
-            # 🔥 FIX 3: Better disk space check with estimation
+            # 🔥 ব্যাচ শুরুর আগে পুরোনো টেম্প ফাইল ক্লিনআপ
+            cleanup_old_temp_files()
+            
+            # 🔥 মেমরি স্পাইক কমানোর জন্য
+            gc.collect()
+            gc.collect()
+            time.sleep(1)
+
             free_mb = check_disk_space()
             batch_pages = min(PDF_BATCH_SIZE, total_pages - batch_start)
             estimated_needed = estimate_needed_space(batch_pages)
 
-            if free_mb < estimated_needed + 100:  # Add 100MB buffer
+            if free_mb < estimated_needed + 100:
                 raise Exception(f"Low disk space: {free_mb}MB free, need ~{estimated_needed}MB for batch")
 
             batch_end = min(batch_start + PDF_BATCH_SIZE, total_pages)
 
-            # 🔥 FIX 9: Use mkdtemp for unique temp folder
             temp_folder = Path(tempfile.mkdtemp(prefix=f"{task_id}_{pdf['number']}_batch{batch_number}_", dir=TEMP_DIR))
 
             print(f"[INFO] 📦 Batch {batch_number}: Pages {batch_start+1}-{batch_end} [Mem BEFORE: {get_memory_usage()}MB, Disk: {free_mb}MB]", flush=True)
@@ -393,7 +413,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 batch_doc = fitz.open(pdf_path)
 
                 for page_num in range(batch_start, batch_end):
-                    # 🔥 FIX 8: Skip already uploaded pages
                     if uploaded_pages and sub_folder in uploaded_pages:
                         if (page_num + 1) in uploaded_pages[sub_folder]:
                             print(f"[INFO] ⏭️ Skipping page {page_num+1} (already uploaded)", flush=True)
@@ -401,8 +420,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                             continue
 
                     page = batch_doc.load_page(page_num)
-                    zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
-                    mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(dpi=300, alpha=False)
 
                     img_name = f"page_{page_num+1:04d}.png"
@@ -410,28 +427,28 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                     pix.save(tmp_path)
 
                     total_pages_processed += 1
-
-                    # 🔥 FIX 7: Thread-safe update
                     update_task_progress(task_id, current_page=page_num + 1)
 
-                    # 🔥 FIX 2: Explicit cleanup
+                    # 🔥 অবিলম্বে মেমরি ফ্রি
                     pix = None
                     page = None
 
-                    if (page_num - batch_start + 1) % 3 == 0:
+                    if (page_num - batch_start + 1) % 5 == 0:
                         gc.collect()
+                        fitz.TOOLS.store_shrink(0)
 
                 if batch_doc is not None:
                     batch_doc.close()
                     batch_doc = None
 
-                # 🔥 FIX 2: Shrink PyMuPDF store
-                fitz.TOOLS.store_shrink(100)
+                # 🔥 PyMuPDF সম্পূর্ণ রিসেট
+                fitz.TOOLS.store_shrink(0)
+                fitz.TOOLS.reset_store()
+                gc.collect()
                 gc.collect()
 
                 print(f"[INFO] 📤 Uploading batch {batch_number}... [Mem BEFORE upload: {get_memory_usage()}MB]", flush=True)
 
-                # Check if there are files to upload
                 png_files = list(temp_folder.glob("*.png"))
                 if png_files:
                     upload_success = upload_folder_streaming_chunks(
@@ -457,21 +474,22 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                         pass
                     batch_doc = None
 
-                # 🔥 FIX 9: Cleanup temp folder with retry
+                # 🔥 টেম্প ফোল্ডার জোরপূর্বক ডিলিট
                 try:
                     if temp_folder.exists():
                         shutil.rmtree(temp_folder, ignore_errors=True)
-                        # Wait a bit and retry if still exists
                         time.sleep(0.5)
                         if temp_folder.exists():
-                            shutil.rmtree(temp_folder, ignore_errors=True)
+                            subprocess.run(['rm', '-rf', str(temp_folder)], check=False)
                 except Exception as e:
                     print(f"[WARN] Could not remove temp folder: {e}", flush=True)
 
+                # 🔥 সম্পূর্ণ মেমরি ক্লিনআপ
                 gc.collect()
                 gc.collect()
+                fitz.TOOLS.store_shrink(0)
+                fitz.TOOLS.reset_store()
 
-                # 🔥 FIX 7: Thread-safe update
                 update_task_progress(
                     task_id,
                     memory_usage=get_memory_usage(),
@@ -479,14 +497,13 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 )
 
                 if batch_end < total_pages:
-                    wait_time = 10 + random.uniform(0, 2)  # 🔥 FIX 6: Add jitter
+                    wait_time = 5 + random.uniform(0, 2)
                     print(f"[INFO] ⏸️ Pausing {wait_time:.1f}s... [Mem AFTER cleanup: {get_memory_usage()}MB]", flush=True)
                     time.sleep(wait_time)
 
         return total_pages_processed, False
 
     finally:
-        # 🔥 FIX 2: Ensure PDF is closed
         if not pdf_closed:
             try:
                 if 'doc' in locals() and doc is not None:
@@ -497,7 +514,13 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
             os.unlink(pdf_path)
         except:
             pass
+        
+        # 🔥 ফাইনাল ক্লিনআপ
         gc.collect()
+        gc.collect()
+        fitz.TOOLS.store_shrink(0)
+        fitz.TOOLS.reset_store()
+        cleanup_old_temp_files()
 
 
 def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
@@ -518,7 +541,6 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
         uploaded_pages = hf_progress.get("uploaded_pages", {})
         processed_count = 0
 
-        # 🔥 FIX 7: Thread-safe update
         update_task_progress(
             task_id,
             completed_pdfs=0,
@@ -534,10 +556,8 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            # Check if completely uploaded
             if str(pdf_number) in hf_processed:
                 pages_uploaded = uploaded_pages.get(str(pdf_number), set())
-                # We'll still process to verify/catch missing pages
                 print(f"[INFO] PDF {pdf_number} has {len(pages_uploaded)} pages uploaded, will check for missing pages", flush=True)
 
             pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
@@ -553,7 +573,6 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
                 processed_count += 1
                 print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
 
-                # 🔥 FIX 7: Thread-safe update
                 update_task_progress(
                     task_id,
                     completed_pdfs=processed_count,
@@ -563,7 +582,6 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
                 )
 
                 if idx < len(pdf_urls) - 1:
-                    # 🔥 FIX 6: Add jitter to sleep
                     sleep_time = PDF_SLEEP_BETWEEN + random.uniform(0, 1)
                     time.sleep(sleep_time)
 
@@ -574,7 +592,6 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
 
         print(f"[INFO] 🎉 Completed {processed_count} PDFs!", flush=True)
 
-        # 🔥 FIX 7: Thread-safe update
         update_task_progress(
             task_id,
             status="completed",
@@ -582,15 +599,10 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             completed_pdfs=processed_count,
             memory_usage=get_memory_usage()
         )
-        
-        # 🔥 BUG FIX: টাস্ক সম্পন্ন হলে ফাইল থেকে মুছে ফেলুন (ঐচ্ছিক)
-        # completed হলে ফাইল থেকে ডিলিট করতে চাইলে নিচের লাইন আনকমেন্ট করুন
-        # cleanup_completed_task(task_id)
-        
+
     except Exception as e:
         print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
-        # 🔥 FIX 7: Thread-safe update
         update_task_progress(
             task_id,
             status="failed",
@@ -786,7 +798,6 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
                         
-                        // ✅ মেমরি বার - Render.com ফ্রি টায়ার লিমিট (৫২৫ MB)
                         const memUsage = task.memory_usage || 0;
                         const RENDER_LIMIT = 525;
                         const memPercent = Math.round((memUsage / RENDER_LIMIT) * 100);
@@ -968,21 +979,19 @@ https://archive.org/details/20260415_20260415_0945`;
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 🔥 BUG FIX: সার্ভার স্টার্ট হলে পূর্বের টাস্ক লোড করুন
     global running_tasks
     saved_tasks = load_tasks_from_file()
     if saved_tasks:
         with running_tasks_lock:
             for task_id, task_info in saved_tasks.items():
                 if task_info.get("status") == "running":
-                    task_info["status"] = "interrupted"  # সার্ভার রিস্টার্ট হলে ইন্টারাপ্টেড মার্ক করুন
+                    task_info["status"] = "interrupted"
                 running_tasks[task_id] = task_info
         print(f"[INFO] Loaded {len(saved_tasks)} tasks from file", flush=True)
-    
+
     yield
     global shutdown_in_progress
     shutdown_in_progress = True
-    # 🔥 BUG FIX: শাটডাউনের আগে টাস্ক সংরক্ষণ করুন
     save_tasks_to_file()
 
 app = FastAPI(lifespan=lifespan)
@@ -1062,10 +1071,8 @@ async def process_form(request: Request):
         with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
 
-        # 🔥 BUG FIX: টাস্ক শুরু হলে ফাইলেও সংরক্ষণ করুন
         save_tasks_to_file()
 
-        # 🔥 FIX 1: Use asyncio.to_thread instead of raw threading
         asyncio.create_task(
             asyncio.to_thread(process_pdf_urls_sync, pdf_urls, book_name, task_id)
         )
@@ -1094,17 +1101,15 @@ async def get_tasks():
             if "thread" in task_copy:
                 del task_copy["thread"]
             tasks_copy[task_id] = task_copy
-    
-    # 🔥 BUG FIX: যদি মেমরিতে টাস্ক না থাকে, ফাইল থেকে লোড করুন
+
     if not tasks_copy:
         tasks_copy = load_tasks_from_file()
-        # ফাইল থেকে লোড করা টাস্ক মেমরিতে রিস্টোর করুন
         if tasks_copy:
             with running_tasks_lock:
                 for task_id, task_info in tasks_copy.items():
                     if task_id not in running_tasks:
                         running_tasks[task_id] = task_info
-    
+
     return tasks_copy
 
 @app.get("/cancel/{task_id}")
