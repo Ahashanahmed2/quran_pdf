@@ -40,18 +40,15 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 MIN_FREE_SPACE_MB = 500
 MAX_JOB_RUNTIME = 12 * 3600
 PDF_SLEEP_BETWEEN = 3
-BATCH_SIZE = 20  # প্রতি ব্যাচে ১০০ পৃষ্ঠা
+BATCH_SIZE = 20  # ২০ পৃষ্ঠা করে ব্যাচ
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
 running_tasks = {}
-running_tasks_lock = threading.Lock()  # 🔥 asyncio.Lock() থেকে threading.Lock()
+running_tasks_lock = threading.Lock()
 task_controls = {}
-task_controls_lock = threading.Lock()  # 🔥 asyncio.Lock() থেকে threading.Lock()
+task_controls_lock = threading.Lock()
 shutdown_in_progress = False
-
-# মেইন ইভেন্ট লুপ (পরে সেট করা হবে)
-main_event_loop = None
 
 # SSL কনটেক্সট
 ssl_context = ssl.create_default_context()
@@ -180,52 +177,62 @@ def download_pdf_stream(url):
 # ============ স্ট্রিমিং আপলোড ফাংশন ============
 def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: str):
     """চাংক আকারে স্ট্রিমিং আপলোড - এক কমিটে"""
-    try:
-        png_files = sorted(Path(local_folder).glob("*.png"))
-        file_count = len(png_files)
-        
-        if file_count == 0:
-            print(f"[ERROR] No PNG files found", flush=True)
-            return False
+    max_retries = 3
+    
+    for retry in range(max_retries):
+        try:
+            png_files = sorted(Path(local_folder).glob("*.png"))
+            file_count = len(png_files)
+            
+            if file_count == 0:
+                print(f"[ERROR] No PNG files found", flush=True)
+                return False
 
-        print(f"[INFO] Uploading {file_count} images to: {hf_path}", flush=True)
-        
-        api = HfApi(token=HF_TOKEN)
-        
-        operations = []
-        
-        for idx, png_file in enumerate(png_files, 1):
-            remote_path = f"{hf_path}/{png_file.name}"
+            print(f"[INFO] Uploading {file_count} images (attempt {retry+1}/{max_retries}) to: {hf_path}", flush=True)
             
-            with open(png_file, 'rb') as f:
-                content = f.read()
+            api = HfApi(token=HF_TOKEN)
             
-            operations.append(
-                CommitOperationAdd(
-                    path_in_repo=remote_path,
-                    path_or_fileobj=content
+            operations = []
+            
+            for idx, png_file in enumerate(png_files, 1):
+                remote_path = f"{hf_path}/{png_file.name}"
+                
+                with open(png_file, 'rb') as f:
+                    content = f.read()
+                
+                operations.append(
+                    CommitOperationAdd(
+                        path_in_repo=remote_path,
+                        path_or_fileobj=content
+                    )
                 )
+                
+                if idx % 10 == 0:
+                    print(f"[INFO] Prepared {idx}/{file_count} files", flush=True)
+            
+            print(f"[INFO] Creating single commit with {len(operations)} files...", flush=True)
+            
+            api.create_commit(
+                repo_id=HF_DATASET,
+                repo_type="dataset",
+                operations=operations,
+                commit_message=f"📚 {batch_name} - {file_count} pages"
             )
             
-            if idx % 50 == 0:
-                print(f"[INFO] Prepared {idx}/{file_count} files", flush=True)
-        
-        print(f"[INFO] Creating single commit with {len(operations)} files...", flush=True)
-        
-        api.create_commit(
-            repo_id=HF_DATASET,
-            repo_type="dataset",
-            operations=operations,
-            commit_message=f"📚 {batch_name} - {file_count} pages"
-        )
-        
-        print(f"[INFO] ✅ Uploaded {file_count} images in single commit", flush=True)
-        return True
-        
-    except Exception as e:
-        print(f"[ERROR] ❌ Upload failed: {e}", flush=True)
-        traceback.print_exc()
-        return False
+            print(f"[INFO] ✅ Uploaded {file_count} images in single commit", flush=True)
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] Upload attempt {retry+1} failed: {e}", flush=True)
+            if retry < max_retries - 1:
+                wait_time = 10 * (retry + 1)
+                print(f"[INFO] Waiting {wait_time}s before retry...", flush=True)
+                time.sleep(wait_time)
+            else:
+                traceback.print_exc()
+                return False
+    
+    return False
 
 def is_task_cancelled(task_id):
     with task_controls_lock:
@@ -238,7 +245,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
 
     start_page = 0
     if checkpoint.get('current') == pdf['name']:
-        start_page = checkpoint.get('last_page', 0)
+        start_page = checkpoint.get('last_page', 0) + 1
         if start_page > 0:
             print(f"[INFO] Resuming from page {start_page + 1}", flush=True)
 
@@ -253,6 +260,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
         return 0, False
 
     doc = None
+    total_pages_processed = 0
 
     try:
         doc = fitz.open(pdf_path)
@@ -266,12 +274,12 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
                 running_tasks[task_id]["current_pdf_total_pages"] = total_pages
                 running_tasks[task_id]["current_page"] = start_page
 
-        pages_processed = 0
         batch_number = (start_page // BATCH_SIZE) + 1
         
         for batch_start in range(start_page, total_pages, BATCH_SIZE):
             if shutdown_in_progress or is_task_cancelled(task_id):
-                return pages_processed, True
+                print(f"[INFO] Task cancelled or shutdown", flush=True)
+                return total_pages_processed, True
             
             batch_end = min(batch_start + BATCH_SIZE, total_pages)
             
@@ -281,9 +289,10 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
             print(f"[INFO] 📦 Batch {batch_number}: Generating pages {batch_start+1}-{batch_end}", flush=True)
             
             try:
+                # ব্যাচের PNG জেনারেট
                 for page_num in range(batch_start, batch_end):
                     page = doc.load_page(page_num)
-                    zoom = 4.0
+                    zoom = 4.0  # 300 DPI
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat, alpha=False)
                     
@@ -291,14 +300,17 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
                     tmp_path = temp_folder / img_name
                     pix.save(tmp_path)
                     
-                    pages_processed += 1
+                    total_pages_processed += 1
                     
                     with running_tasks_lock:
                         if task_id in running_tasks:
                             running_tasks[task_id]["current_page"] = page_num + 1
                     
                     del pix
-                    gc.collect()
+                    
+                    # প্রতি ৫ পৃষ্ঠায় GC
+                    if (page_num - batch_start + 1) % 5 == 0:
+                        gc.collect()
                 
                 print(f"[INFO] 📤 Uploading batch {batch_number} ({batch_end-batch_start} pages)...", flush=True)
                 
@@ -311,28 +323,54 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
                 if upload_success:
                     print(f"[INFO] ✅ Batch {batch_number} uploaded", flush=True)
                     
-                    checkpoint['current'] = pdf['name']
-                    checkpoint['last_page'] = batch_end - 1
-                    save_checkpoint_sync(folder_key, checkpoint)
+                    # চেকপয়েন্ট আপডেট
+                    try:
+                        checkpoint['current'] = pdf['name']
+                        checkpoint['last_page'] = batch_end - 1
+                        save_checkpoint_sync(folder_key, checkpoint)
+                        print(f"[INFO] Checkpoint saved: page {batch_end}", flush=True)
+                    except Exception as e:
+                        print(f"[ERROR] Checkpoint save failed: {e}", flush=True)
                     
                     batch_number += 1
                 else:
+                    print(f"[ERROR] ❌ Batch {batch_number} upload failed after retries", flush=True)
+                    # চেকপয়েন্ট সেভ করে রাখি যাতে রেজিউম করা যায়
+                    try:
+                        checkpoint['current'] = pdf['name']
+                        checkpoint['last_page'] = batch_start - 1
+                        save_checkpoint_sync(folder_key, checkpoint)
+                    except:
+                        pass
                     raise Exception(f"Batch {batch_number} upload failed")
                     
+            except Exception as e:
+                print(f"[ERROR] Batch {batch_number} error: {e}", flush=True)
+                traceback.print_exc()
+                raise
+                
             finally:
+                # টেম্প ফোল্ডার ক্লিনআপ
                 try:
-                    shutil.rmtree(temp_folder, ignore_errors=True)
-                except:
-                    pass
+                    if temp_folder.exists():
+                        shutil.rmtree(temp_folder, ignore_errors=True)
+                except Exception as e:
+                    print(f"[WARN] Failed to cleanup temp folder: {e}", flush=True)
                 
                 gc.collect()
+                
+                # ব্যাচের মাঝে বিরতি
+                if batch_end < total_pages:
+                    wait_time = 5
+                    print(f"[INFO] ⏸️ Waiting {wait_time} seconds before next batch...", flush=True)
+                    time.sleep(wait_time)
 
-        print(f"[INFO] ✅ Complete: {pdf['name']} - {pages_processed} pages", flush=True)
+        print(f"[INFO] ✅ Complete: {pdf['name']} - {total_pages_processed} pages", flush=True)
         checkpoint['current'] = None
         checkpoint['last_page'] = total_pages
         save_checkpoint_sync(folder_key, checkpoint)
         
-        return pages_processed, False
+        return total_pages_processed, False
 
     finally:
         if doc:
@@ -356,6 +394,7 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
 
         if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
+            print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
 
         checkpoint = load_checkpoint_sync(f"direct_{clean_folder_name}")
         local_processed = set(checkpoint.get('processed', []))
@@ -434,7 +473,7 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)
 
-# ============ HTML টেমপ্লেট (সংক্ষিপ্ত - আগের মতই) ============
+# ============ HTML টেমপ্লেট ============
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="bn">
@@ -761,8 +800,6 @@ https://archive.org/details/20260415_20260415_0945`;
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global main_event_loop
-    main_event_loop = asyncio.get_event_loop()
     yield
     global shutdown_in_progress
     shutdown_in_progress = True
@@ -831,7 +868,6 @@ async def process_form(request: Request):
         with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
 
-        # 🔥 সিঙ্ক্রোনাস থ্রেড (কোনো asyncio নেই)
         thread = threading.Thread(
             target=process_pdf_urls_sync,
             args=(pdf_urls, book_name, task_id),
