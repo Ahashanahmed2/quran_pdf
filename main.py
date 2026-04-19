@@ -72,7 +72,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 MIN_FREE_SPACE_MB = 500
 PDF_SLEEP_BETWEEN = 3
 PDF_BATCH_SIZE = 10
-MAX_FILES_PER_COMMIT = 50
+MAX_FILES_PER_COMMIT = 150
 MAX_CONCURRENT_TASKS = 2
 # =====================================
 
@@ -1037,8 +1037,12 @@ async def get_tasks():
         tasks_copy = {}
         for task_id, task_info in running_tasks.items():
             task_copy = task_info.copy()
-            task_copy["memory_usage"] = get_memory_usage()
-            task_copy["system_memory"] = get_system_memory()
+            # ✅ ব্যাকগ্রাউন্ড থেকে সংরক্ষিত মেমরি ডাটা ব্যবহার করবে
+            # যদি না থাকে তবেই নতুন করে চেক করবে
+            if "memory_usage" not in task_copy or task_copy["memory_usage"] == 0:
+                task_copy["memory_usage"] = get_memory_usage()
+            if "system_memory" not in task_copy:
+                task_copy["system_memory"] = get_system_memory()
             if "thread" in task_copy:
                 del task_copy["thread"]
             tasks_copy[task_id] = task_copy
