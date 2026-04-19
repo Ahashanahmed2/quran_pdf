@@ -69,10 +69,10 @@ HF_DATASET = os.environ.get("HF_DATASET")
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
-MIN_FREE_SPACE_MB = 40
+MIN_FREE_SPACE_MB = 150
 PDF_SLEEP_BETWEEN = 3
-PDF_BATCH_SIZE = 30
-MAX_FILES_PER_COMMIT = 31
+PDF_BATCH_SIZE = 24
+MAX_FILES_PER_COMMIT = 25
 MAX_CONCURRENT_TASKS = 2
 # =====================================
 
