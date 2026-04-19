@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 FastAPI + HTML Form with HF Folder Check + Memory Monitor
+Fixed Version - Critical Bug Fixes
 """
 
 import os
@@ -18,6 +19,7 @@ import threading
 import urllib.request
 import urllib.error
 import ssl
+import random
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -69,7 +71,9 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 MIN_FREE_SPACE_MB = 500
 PDF_SLEEP_BETWEEN = 3
-BATCH_SIZE = 20
+PDF_BATCH_SIZE = 10
+MAX_FILES_PER_COMMIT = 50
+MAX_CONCURRENT_TASKS = 2
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
@@ -80,13 +84,28 @@ task_controls_lock = threading.Lock()
 shutdown_in_progress = False
 
 # SSL কনটেক্সট
-ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = False
-ssl_context.verify_mode = ssl.CERT_NONE
+ssl_context = ssl.create_defaultcontext()
 
 class ProcessRequest(BaseModel):
     book_name: str
     urls: list
+
+# ============ ডিস্ক স্পেস চেক ============
+def check_disk_space():
+    """চেক করুন /tmp এ যথেষ্ট জায়গা আছে কিনা"""
+    try:
+        total, used, free = shutil.disk_usage("/tmp")
+        free_mb = free // (1024 * 1024)
+        return free_mb
+    except Exception as e:
+        print(f"[Disk Check] Warning: {e}", flush=True)
+        return 999999
+
+# 🔥 FIX 3: Estimate needed disk space
+def estimate_needed_space(total_pages):
+    """Estimate disk space needed for batch processing"""
+    # Approximate: each page ~0.5MB at 3x zoom
+    return total_pages * 0.5
 
 # ============ HF ফোল্ডার চেক ============
 def get_hf_folder_progress(hf_path: str) -> dict:
@@ -99,21 +118,32 @@ def get_hf_folder_progress(hf_path: str) -> dict:
         )
 
         pdf_folders = set()
+        uploaded_files = {}
         for file in files:
             parts = file.rfilename.split('/')
             if len(parts) >= 2:
                 folder_name = parts[1] if parts[0] == hf_path else parts[0]
                 if folder_name.isdigit():
                     pdf_folders.add(folder_name)
+                    if folder_name not in uploaded_files:
+                        uploaded_files[folder_name] = set()
+                    file_name = parts[-1]
+                    if file_name.startswith("page_") and file_name.endswith(".png"):
+                        try:
+                            page_num = int(file_name.replace("page_", "").replace(".png", ""))
+                            uploaded_files[folder_name].add(page_num)
+                        except:
+                            pass
 
         return {
             "exists": True,
             "uploaded_pdfs": sorted(list(pdf_folders)),
-            "total_uploaded": len(pdf_folders)
+            "total_uploaded": len(pdf_folders),
+            "uploaded_pages": uploaded_files
         }
     except Exception as e:
         print(f"[HF Check] Error: {e}", flush=True)
-        return {"exists": False, "uploaded_pdfs": [], "total_uploaded": 0}
+        return {"exists": False, "uploaded_pdfs": [], "total_uploaded": 0, "uploaded_pages": {}}
 
 # ============ PDF ডাউনলোড ============
 def download_pdf_stream(url):
@@ -129,7 +159,7 @@ def download_pdf_stream(url):
 
         req = urllib.request.Request(url, headers=headers)
 
-        with urllib.request.urlopen(req, context=ssl_context, timeout=300) as response:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=120) as response:
             total_size = 0
             while True:
                 chunk = response.read(8192)
@@ -152,9 +182,28 @@ def download_pdf_stream(url):
             pass
         raise e
 
+# 🔥 FIX 6: Rate limiting with jitter
+def download_pdf_with_retry(url, max_retries=3):
+    """PDF ডাউনলোড রিট্রাই সহ এবং rate limiting"""
+    for retry in range(max_retries):
+        try:
+            # Add random jitter to avoid thundering herd
+            if retry > 0:
+                jitter = random.uniform(1, 3)
+                time.sleep(jitter)
+            return download_pdf_stream(url)
+        except Exception as e:
+            print(f"[WARN] Download attempt {retry+1} failed: {e}", flush=True)
+            if retry < max_retries - 1:
+                wait_time = 5 * (retry + 1) + random.uniform(1, 3)
+                print(f"[INFO] Retrying in {wait_time:.1f}s...", flush=True)
+                time.sleep(wait_time)
+            else:
+                raise
+
 # ============ স্ট্রিমিং আপলোড ফাংশন ============
 def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: str):
-    max_retries = 3
+    max_retries = 5
     
     for retry in range(max_retries):
         try:
@@ -169,32 +218,32 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
             
             api = HfApi(token=HF_TOKEN)
             
-            operations = []
-            
-            for idx, png_file in enumerate(png_files, 1):
-                remote_path = f"{hf_path}/{png_file.name}"
+            for chunk_start in range(0, file_count, MAX_FILES_PER_COMMIT):
+                chunk_end = min(chunk_start + MAX_FILES_PER_COMMIT, file_count)
+                chunk_files = png_files[chunk_start:chunk_end]
                 
-                with open(png_file, 'rb') as f:
-                    content = f.read()
-                
-                operations.append(
-                    CommitOperationAdd(
-                        path_in_repo=remote_path,
-                        path_or_fileobj=content
+                operations = []
+                for png_file in chunk_files:
+                    remote_path = f"{hf_path}/{png_file.name}"
+                    
+                    operations.append(
+                        CommitOperationAdd(
+                            path_in_repo=remote_path,
+                            path_or_fileobj=str(png_file)
+                        )
                     )
-                )
                 
-                if idx % 10 == 0:
-                    print(f"[INFO] Prepared {idx}/{file_count} files", flush=True)
-            
-            print(f"[INFO] Creating single commit with {len(operations)} files...", flush=True)
-            
-            api.create_commit(
-                repo_id=HF_DATASET,
-                repo_type="dataset",
-                operations=operations,
-                commit_message=f"📚 {batch_name} - {file_count} pages"
-            )
+                chunk_num = chunk_start // MAX_FILES_PER_COMMIT + 1
+                total_chunks = (file_count + MAX_FILES_PER_COMMIT - 1) // MAX_FILES_PER_COMMIT
+                
+                print(f"[INFO] Commit {chunk_num}/{total_chunks}: {len(operations)} files", flush=True)
+                
+                api.create_commit(
+                    repo_id=HF_DATASET,
+                    repo_type="dataset",
+                    operations=operations,
+                    commit_message=f"📚 {batch_name} - part{chunk_num} ({len(operations)} pages)"
+                )
             
             print(f"[INFO] ✅ Uploaded {file_count} images", flush=True)
             return True
@@ -202,7 +251,7 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
         except Exception as e:
             print(f"[ERROR] Upload attempt {retry+1} failed: {e}", flush=True)
             if retry < max_retries - 1:
-                wait_time = 10 * (retry + 1)
+                wait_time = 30 * (retry + 1)
                 print(f"[INFO] Waiting {wait_time}s before retry...", flush=True)
                 time.sleep(wait_time)
             else:
@@ -214,7 +263,16 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
 def is_task_cancelled(task_id):
     with task_controls_lock:
         return task_controls.get(task_id, {}).get("cancel", False)
-def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pdfs):
+
+# 🔥 FIX 7: Thread-safe task update
+def update_task_progress(task_id, **kwargs):
+    """Thread-safe task progress update"""
+    with running_tasks_lock:
+        if task_id in running_tasks:
+            for key, value in kwargs.items():
+                running_tasks[task_id][key] = value
+
+def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pdfs, uploaded_pages=None):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
     print(f"[INFO] Processing: {pdf['name']} -> {full_hf_path}", flush=True)
@@ -222,122 +280,188 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
     if not pdf.get('download_link'):
         return 0, False
 
+    free_mb = check_disk_space()
+    if free_mb < MIN_FREE_SPACE_MB:
+        raise Exception(f"Low disk space: {free_mb}MB free, need {MIN_FREE_SPACE_MB}MB")
+    print(f"[INFO] Disk space: {free_mb}MB free", flush=True)
+
     print(f"[INFO] Downloading: {pdf['name']}", flush=True)
     try:
-        pdf_path = download_pdf_stream(pdf['download_link'])
+        pdf_path = download_pdf_with_retry(pdf['download_link'])
     except Exception as e:
         print(f"[ERROR] Download failed: {e}", flush=True)
         return 0, False
 
     total_pages_processed = 0
+    pdf_closed = False  # 🔥 FIX 2: Track if PDF is closed
 
     try:
-        # 🔥 প্রথমে শুধু পেজ কাউন্ট জানুন
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         doc.close()
-        del doc
+        doc = None  # 🔥 FIX 2: Explicitly set to None
+        pdf_closed = True
         gc.collect()
-        
+
         print(f"[INFO] {pdf['name']}: {total_pages} pages [Mem: {get_memory_usage()}MB]", flush=True)
 
-        with running_tasks_lock:
-            if task_id in running_tasks:
-                running_tasks[task_id]["current_pdf"] = pdf['name']
-                running_tasks[task_id]["current_pdf_index"] = pdf_index
-                running_tasks[task_id]["current_pdf_total_pages"] = total_pages
-                running_tasks[task_id]["current_page"] = 0
-                running_tasks[task_id]["memory_usage"] = get_memory_usage()
-                running_tasks[task_id]["system_memory"] = get_system_memory()
+        # 🔥 FIX 4: Proper resume logic
+        start_page = 0
+        if uploaded_pages and sub_folder in uploaded_pages:
+            uploaded_set = uploaded_pages[sub_folder]
+            if uploaded_set:
+                # Use max page as starting point
+                max_uploaded = max(uploaded_set)
+                # Check if all pages up to max_uploaded are present
+                all_present = all(p in uploaded_set for p in range(1, max_uploaded + 1))
+                if all_present:
+                    start_page = max_uploaded
+                    print(f"[INFO] 📍 Resuming from page {start_page + 1} ({len(uploaded_set)} pages already uploaded)", flush=True)
+                else:
+                    # Find first missing page
+                    for p in range(1, total_pages + 1):
+                        if p not in uploaded_set:
+                            start_page = p - 1
+                            break
+                    print(f"[INFO] 📍 Partial upload detected, resuming from page {start_page + 1}", flush=True)
 
-        batch_number = 1
-        BATCH_SIZE = 10  # ছোট ব্যাচ
-        
-        for batch_start in range(0, total_pages, BATCH_SIZE):
+        # 🔥 FIX 7: Thread-safe update
+        update_task_progress(
+            task_id,
+            current_pdf=pdf['name'],
+            current_pdf_index=pdf_index,
+            current_pdf_total_pages=total_pages,
+            current_page=start_page,
+            memory_usage=get_memory_usage(),
+            system_memory=get_system_memory()
+        )
+
+        batch_number = (start_page // PDF_BATCH_SIZE) + 1
+
+        for batch_start in range(start_page, total_pages, PDF_BATCH_SIZE):
             if shutdown_in_progress or is_task_cancelled(task_id):
                 return total_pages_processed, True
+
+            # 🔥 FIX 3: Better disk space check with estimation
+            free_mb = check_disk_space()
+            batch_pages = min(PDF_BATCH_SIZE, total_pages - batch_start)
+            estimated_needed = estimate_needed_space(batch_pages)
             
-            batch_end = min(batch_start + BATCH_SIZE, total_pages)
+            if free_mb < estimated_needed + 100:  # Add 100MB buffer
+                raise Exception(f"Low disk space: {free_mb}MB free, need ~{estimated_needed}MB for batch")
             
-            temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}_batch{batch_number}"
-            temp_folder.mkdir(exist_ok=True)
-            
-            print(f"[INFO] 📦 Batch {batch_number}: Pages {batch_start+1}-{batch_end} [Mem BEFORE: {get_memory_usage()}MB]", flush=True)
-            
-            # 🔥🔥🔥 প্রতি ব্যাচে নতুন করে PDF খুলুন এবং সাথে সাথে বন্ধ করুন
-            batch_doc = fitz.open(pdf_path)
-            
+            batch_end = min(batch_start + PDF_BATCH_SIZE, total_pages)
+
+            # 🔥 FIX 9: Use mkdtemp for unique temp folder
+            temp_folder = Path(tempfile.mkdtemp(prefix=f"{task_id}_{pdf['number']}_batch{batch_number}_", dir=TEMP_DIR))
+
+            print(f"[INFO] 📦 Batch {batch_number}: Pages {batch_start+1}-{batch_end} [Mem BEFORE: {get_memory_usage()}MB, Disk: {free_mb}MB]", flush=True)
+
+            batch_doc = None
             try:
+                batch_doc = fitz.open(pdf_path)
+
                 for page_num in range(batch_start, batch_end):
+                    # 🔥 FIX 8: Skip already uploaded pages
+                    if uploaded_pages and sub_folder in uploaded_pages:
+                        if (page_num + 1) in uploaded_pages[sub_folder]:
+                            print(f"[INFO] ⏭️ Skipping page {page_num+1} (already uploaded)", flush=True)
+                            total_pages_processed += 1
+                            continue
+
                     page = batch_doc.load_page(page_num)
-                    zoom = 4.0
+                    zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat, alpha=False)
-                    
+
                     img_name = f"page_{page_num+1:04d}.png"
                     tmp_path = temp_folder / img_name
                     pix.save(tmp_path)
-                    
+
                     total_pages_processed += 1
-                    
-                    with running_tasks_lock:
-                        if task_id in running_tasks:
-                            running_tasks[task_id]["current_page"] = page_num + 1
-                    
-                    # 🔥 প্রতিটি পৃষ্ঠার পর মেমরি খালি
-                    del page
-                    del pix
-                    
+
+                    # 🔥 FIX 7: Thread-safe update
+                    update_task_progress(task_id, current_page=page_num + 1)
+
+                    # 🔥 FIX 2: Explicit cleanup
+                    pix = None
+                    page = None
+
                     if (page_num - batch_start + 1) % 3 == 0:
                         gc.collect()
-                
-                # 🔥 PDF সাথে সাথে বন্ধ
-                batch_doc.close()
-                
-                print(f"[INFO] 📤 Uploading batch {batch_number}... [Mem BEFORE upload: {get_memory_usage()}MB]", flush=True)
-                
-                upload_success = upload_folder_streaming_chunks(
-                    str(temp_folder), 
-                    full_hf_path, 
-                    f"{pdf['name']}_batch{batch_number}"
-                )
-                
-                if upload_success:
-                    print(f"[INFO] ✅ Batch {batch_number} uploaded [Mem AFTER upload: {get_memory_usage()}MB]", flush=True)
-                    batch_number += 1
-                else:
-                    raise Exception(f"Batch {batch_number} upload failed")
-                    
-            finally:
-                # 🔥🔥🔥 জোর করে মেমরি খালি
-                if batch_doc:
+
+                if batch_doc is not None:
                     batch_doc.close()
-                del batch_doc
-                
+                    batch_doc = None
+
+                # 🔥 FIX 2: Shrink PyMuPDF store
+                fitz.TOOLS.store_shrink(100)
+                gc.collect()
+
+                print(f"[INFO] 📤 Uploading batch {batch_number}... [Mem BEFORE upload: {get_memory_usage()}MB]", flush=True)
+
+                # Check if there are files to upload
+                png_files = list(temp_folder.glob("*.png"))
+                if png_files:
+                    upload_success = upload_folder_streaming_chunks(
+                        str(temp_folder), 
+                        full_hf_path, 
+                        f"{pdf['name']}_batch{batch_number}"
+                    )
+
+                    if upload_success:
+                        print(f"[INFO] ✅ Batch {batch_number} uploaded [Mem AFTER upload: {get_memory_usage()}MB]", flush=True)
+                        batch_number += 1
+                    else:
+                        raise Exception(f"Batch {batch_number} upload failed")
+                else:
+                    print(f"[INFO] ℹ️ Batch {batch_number} had no new pages to upload", flush=True)
+                    batch_number += 1
+
+            finally:
+                if batch_doc is not None:
+                    try:
+                        batch_doc.close()
+                    except:
+                        pass
+                    batch_doc = None
+
+                # 🔥 FIX 9: Cleanup temp folder with retry
                 try:
                     if temp_folder.exists():
                         shutil.rmtree(temp_folder, ignore_errors=True)
-                except:
-                    pass
-                
-                # 🔥 তিনবার GC
+                        # Wait a bit and retry if still exists
+                        time.sleep(0.5)
+                        if temp_folder.exists():
+                            shutil.rmtree(temp_folder, ignore_errors=True)
+                except Exception as e:
+                    print(f"[WARN] Could not remove temp folder: {e}", flush=True)
+
                 gc.collect()
                 gc.collect()
-                gc.collect()
-                
-                with running_tasks_lock:
-                    if task_id in running_tasks:
-                        running_tasks[task_id]["memory_usage"] = get_memory_usage()
-                        running_tasks[task_id]["system_memory"] = get_system_memory()
-                
+
+                # 🔥 FIX 7: Thread-safe update
+                update_task_progress(
+                    task_id,
+                    memory_usage=get_memory_usage(),
+                    system_memory=get_system_memory()
+                )
+
                 if batch_end < total_pages:
-                    wait_time = 15  # বেশি অপেক্ষা
-                    print(f"[INFO] ⏸️ Pausing {wait_time}s... [Mem AFTER cleanup: {get_memory_usage()}MB]", flush=True)
+                    wait_time = 10 + random.uniform(0, 2)  # 🔥 FIX 6: Add jitter
+                    print(f"[INFO] ⏸️ Pausing {wait_time:.1f}s... [Mem AFTER cleanup: {get_memory_usage()}MB]", flush=True)
                     time.sleep(wait_time)
 
         return total_pages_processed, False
 
     finally:
+        # 🔥 FIX 2: Ensure PDF is closed
+        if not pdf_closed:
+            try:
+                if 'doc' in locals() and doc is not None:
+                    doc.close()
+            except:
+                pass
         try:
             os.unlink(pdf_path)
         except:
@@ -360,13 +484,16 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
 
         hf_processed = set(hf_progress.get("uploaded_pdfs", []))
+        uploaded_pages = hf_progress.get("uploaded_pages", {})
         processed_count = 0
 
-        with running_tasks_lock:
-            if task_id in running_tasks:
-                running_tasks[task_id]["completed_pdfs"] = 0
-                running_tasks[task_id]["memory_usage"] = get_memory_usage()
-                running_tasks[task_id]["system_memory"] = get_system_memory()
+        # 🔥 FIX 7: Thread-safe update
+        update_task_progress(
+            task_id,
+            completed_pdfs=0,
+            memory_usage=get_memory_usage(),
+            system_memory=get_system_memory()
+        )
 
         for idx, url in enumerate(pdf_urls):
             if shutdown_in_progress or is_task_cancelled(task_id):
@@ -376,20 +503,18 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
+            # Check if completely uploaded
             if str(pdf_number) in hf_processed:
-                print(f"[INFO] ⏭️ Skipping {pdf_name} (already on HF)", flush=True)
-                processed_count += 1
-                with running_tasks_lock:
-                    if task_id in running_tasks:
-                        running_tasks[task_id]["completed_pdfs"] = processed_count
-                continue
+                pages_uploaded = uploaded_pages.get(str(pdf_number), set())
+                # We'll still process to verify/catch missing pages
+                print(f"[INFO] PDF {pdf_number} has {len(pages_uploaded)} pages uploaded, will check for missing pages", flush=True)
 
             pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
             print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
 
             try:
                 pages_processed, cancelled = process_single_pdf_sync(
-                    pdf, clean_folder_name, task_id, idx+1, len(pdf_urls)
+                    pdf, clean_folder_name, task_id, idx+1, len(pdf_urls), uploaded_pages
                 )
                 if cancelled:
                     break
@@ -397,15 +522,19 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
                 processed_count += 1
                 print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
 
-                with running_tasks_lock:
-                    if task_id in running_tasks:
-                        running_tasks[task_id]["completed_pdfs"] = processed_count
-                        running_tasks[task_id]["current_pdf"] = None
-                        running_tasks[task_id]["current_page"] = 0
-                        running_tasks[task_id]["memory_usage"] = get_memory_usage()
+                # 🔥 FIX 7: Thread-safe update
+                update_task_progress(
+                    task_id,
+                    completed_pdfs=processed_count,
+                    current_pdf=None,
+                    current_page=0,
+                    memory_usage=get_memory_usage()
+                )
 
                 if idx < len(pdf_urls) - 1:
-                    time.sleep(PDF_SLEEP_BETWEEN)
+                    # 🔥 FIX 6: Add jitter to sleep
+                    sleep_time = PDF_SLEEP_BETWEEN + random.uniform(0, 1)
+                    time.sleep(sleep_time)
 
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
@@ -414,19 +543,23 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
 
         print(f"[INFO] 🎉 Completed {processed_count} PDFs!", flush=True)
 
-        with running_tasks_lock:
-            if task_id in running_tasks:
-                running_tasks[task_id]["status"] = "completed"
-                running_tasks[task_id]["completed_at"] = time.time()
-                running_tasks[task_id]["completed_pdfs"] = processed_count
-                running_tasks[task_id]["memory_usage"] = get_memory_usage()
+        # 🔥 FIX 7: Thread-safe update
+        update_task_progress(
+            task_id,
+            status="completed",
+            completed_at=time.time(),
+            completed_pdfs=processed_count,
+            memory_usage=get_memory_usage()
+        )
     except Exception as e:
         print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
-        with running_tasks_lock:
-            if task_id in running_tasks:
-                running_tasks[task_id]["status"] = "failed"
-                running_tasks[task_id]["error"] = str(e)
+        # 🔥 FIX 7: Thread-safe update
+        update_task_progress(
+            task_id,
+            status="failed",
+            error=str(e)
+        )
 
 # ============ HTML টেমপ্লেট ============
 HTML_TEMPLATE = """
@@ -535,6 +668,14 @@ HTML_TEMPLATE = """
             background: #00d2ff; height: 8px; border-radius: 4px;
             width: 0%; transition: width 0.3s;
         }
+        .memory-warning {
+            background: #ffc107; color: #000; padding: 2px 8px;
+            border-radius: 4px; font-size: 11px; margin-left: 8px;
+        }
+        .memory-critical {
+            background: #dc3545; color: white; padding: 2px 8px;
+            border-radius: 4px; font-size: 11px; margin-left: 8px;
+        }
     </style>
 </head>
 <body>
@@ -609,18 +750,23 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
                         
-                        // মেমরি ইনফো
                         if (task.memory_usage && task.memory_usage > 0) {
                             const memUsage = task.memory_usage;
                             const sysMem = task.system_memory || { total: 512, percent: 0, available: 0 };
                             const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
                             
                             let memColor = '#00d2ff';
-                            if (memPercent > 80) memColor = '#f44336';
-                            else if (memPercent > 60) memColor = '#ff9800';
+                            let warningBadge = '';
+                            if (memPercent > 85) {
+                                memColor = '#dc3545';
+                                warningBadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
+                            } else if (memPercent > 70) {
+                                memColor = '#ff9800';
+                                warningBadge = '<span class="memory-warning">⚠️ সতর্কতা</span>';
+                            }
                             
                             html += `<div class="memory-info">`;
-                            html += `💾 মেমরি: ${memUsage} MB / ${sysMem.total} MB (${memPercent}%)<br>`;
+                            html += `💾 মেমরি: ${memUsage} MB / ${sysMem.total} MB (${memPercent}%) ${warningBadge}<br>`;
                             html += `<div class="memory-bar-container">
                                 <div class="memory-bar" style="width: ${memPercent}%; background: ${memColor};"></div>
                             </div>`;
@@ -822,6 +968,11 @@ async def get_memory():
 @app.post("/process")
 async def process_form(request: Request):
     try:
+        with running_tasks_lock:
+            active_tasks = sum(1 for t in running_tasks.values() if t.get("status") == "running")
+            if active_tasks >= MAX_CONCURRENT_TASKS:
+                return {"status": "error", "message": f"সার্ভার ব্যস্ত। সর্বোচ্চ {MAX_CONCURRENT_TASKS} টি টাস্ক চলতে পারে।"}
+        
         data = await request.json()
         book_name = data.get('book_name', f"tafsir_{int(time.time())}")
         urls = data.get('urls', [])
@@ -864,13 +1015,11 @@ async def process_form(request: Request):
         with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
 
-        thread = threading.Thread(
-            target=process_pdf_urls_sync,
-            args=(pdf_urls, book_name, task_id),
-            daemon=True
+        # 🔥 FIX 1: Use asyncio.to_thread instead of raw threading
+        asyncio.create_task(
+            asyncio.to_thread(process_pdf_urls_sync, pdf_urls, book_name, task_id)
         )
-        thread.start()
-        print(f"[DEBUG] Thread started for task {task_id}", flush=True)
+        print(f"[DEBUG] Task started via asyncio.to_thread for {task_id}", flush=True)
 
         return {
             "status": "started",
@@ -890,6 +1039,8 @@ async def get_tasks():
             task_copy = task_info.copy()
             task_copy["memory_usage"] = get_memory_usage()
             task_copy["system_memory"] = get_system_memory()
+            if "thread" in task_copy:
+                del task_copy["thread"]
             tasks_copy[task_id] = task_copy
         return tasks_copy
 
