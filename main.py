@@ -40,15 +40,18 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 MIN_FREE_SPACE_MB = 500
 MAX_JOB_RUNTIME = 12 * 3600
 PDF_SLEEP_BETWEEN = 3
-BATCH_SIZE = 100  # 🔥 প্রতি ব্যাচে ১০০ পৃষ্ঠা
+BATCH_SIZE = 100  # প্রতি ব্যাচে ১০০ পৃষ্ঠা
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
 running_tasks = {}
-running_tasks_lock = asyncio.Lock()
+running_tasks_lock = threading.Lock()  # 🔥 asyncio.Lock() থেকে threading.Lock()
 task_controls = {}
-task_controls_lock = asyncio.Lock()
+task_controls_lock = threading.Lock()  # 🔥 asyncio.Lock() থেকে threading.Lock()
 shutdown_in_progress = False
+
+# মেইন ইভেন্ট লুপ (পরে সেট করা হবে)
+main_event_loop = None
 
 # SSL কনটেক্সট
 ssl_context = ssl.create_default_context()
@@ -59,20 +62,8 @@ class ProcessRequest(BaseModel):
     book_name: str
     urls: list
 
-# ============ Threading Helper ============
-def run_async_in_thread(coro, *args):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(coro(*args))
-    except Exception as e:
-        print(f"[Thread] Error: {e}", flush=True)
-        traceback.print_exc()
-    finally:
-        loop.close()
-
 # ============ Disk Space Check ============
-async def check_disk_space():
+def check_disk_space_sync():
     try:
         total, used, free = shutil.disk_usage("/tmp")
         free_mb = free // (1024 * 1024)
@@ -88,7 +79,7 @@ def get_checkpoint_path(folder_key):
     safe_key = folder_key.replace('/', '_').replace('\\', '_')
     return CHECKPOINT_DIR / f"checkpoint_{safe_key}.json"
 
-async def async_save_checkpoint(folder_key, checkpoint):
+def save_checkpoint_sync(folder_key, checkpoint):
     try:
         checkpoint_path = get_checkpoint_path(folder_key)
         temp_path = checkpoint_path.with_suffix('.tmp')
@@ -98,7 +89,7 @@ async def async_save_checkpoint(folder_key, checkpoint):
     except Exception as e:
         print(f"[Checkpoint] Error: {e}", flush=True)
 
-async def load_checkpoint(folder_key):
+def load_checkpoint_sync(folder_key):
     try:
         checkpoint_path = get_checkpoint_path(folder_key)
         if checkpoint_path.exists():
@@ -236,11 +227,11 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
         traceback.print_exc()
         return False
 
-async def is_task_cancelled(task_id):
-    async with task_controls_lock:
+def is_task_cancelled(task_id):
+    with task_controls_lock:
         return task_controls.get(task_id, {}).get("cancel", False)
 
-async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, task_id, pdf_index, total_pdfs):
+def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task_id, pdf_index, total_pdfs):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
     print(f"[INFO] Processing: {pdf['name']} -> {full_hf_path}", flush=True)
@@ -268,7 +259,7 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
         total_pages = len(doc)
         print(f"[INFO] {pdf['name']}: {total_pages} pages", flush=True)
 
-        async with running_tasks_lock:
+        with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["current_pdf"] = pdf['name']
                 running_tasks[task_id]["current_pdf_index"] = pdf_index
@@ -278,24 +269,21 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
         pages_processed = 0
         batch_number = (start_page // BATCH_SIZE) + 1
         
-        # 🔥 ব্যাচ লুপ
         for batch_start in range(start_page, total_pages, BATCH_SIZE):
-            if shutdown_in_progress or await is_task_cancelled(task_id):
+            if shutdown_in_progress or is_task_cancelled(task_id):
                 return pages_processed, True
             
             batch_end = min(batch_start + BATCH_SIZE, total_pages)
             
-            # 🔥 নতুন টেম্প ফোল্ডার
             temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}_batch{batch_number}"
             temp_folder.mkdir(exist_ok=True)
             
             print(f"[INFO] 📦 Batch {batch_number}: Generating pages {batch_start+1}-{batch_end}", flush=True)
             
             try:
-                # 🔥 ব্যাচের PNG জেনারেট
                 for page_num in range(batch_start, batch_end):
                     page = doc.load_page(page_num)
-                    zoom = 4.0  # 300 DPI
+                    zoom = 4.0
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat, alpha=False)
                     
@@ -305,15 +293,13 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                     
                     pages_processed += 1
                     
-                    async with running_tasks_lock:
+                    with running_tasks_lock:
                         if task_id in running_tasks:
                             running_tasks[task_id]["current_page"] = page_num + 1
                     
-                    # মেমরি ক্লিয়ার
                     del pix
                     gc.collect()
                 
-                # 🔥 ব্যাচ আপলোড
                 print(f"[INFO] 📤 Uploading batch {batch_number} ({batch_end-batch_start} pages)...", flush=True)
                 
                 upload_success = upload_folder_streaming_chunks(
@@ -325,29 +311,26 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                 if upload_success:
                     print(f"[INFO] ✅ Batch {batch_number} uploaded", flush=True)
                     
-                    # চেকপয়েন্ট আপডেট
                     checkpoint['current'] = pdf['name']
                     checkpoint['last_page'] = batch_end - 1
-                    await async_save_checkpoint(folder_key, checkpoint)
+                    save_checkpoint_sync(folder_key, checkpoint)
                     
                     batch_number += 1
                 else:
                     raise Exception(f"Batch {batch_number} upload failed")
                     
             finally:
-                # 🔥 টেম্প ফোল্ডার ক্লিনআপ (ফোর্সফুলি)
                 try:
                     shutil.rmtree(temp_folder, ignore_errors=True)
                 except:
                     pass
                 
-                # মেমরি ক্লিয়ার
                 gc.collect()
 
         print(f"[INFO] ✅ Complete: {pdf['name']} - {pages_processed} pages", flush=True)
         checkpoint['current'] = None
         checkpoint['last_page'] = total_pages
-        await async_save_checkpoint(folder_key, checkpoint)
+        save_checkpoint_sync(folder_key, checkpoint)
         
         return pages_processed, False
 
@@ -360,7 +343,7 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
             pass
         gc.collect()
 
-async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_id: int = 0):
+def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
     print(f"[DEBUG] Folder: {folder_name}", flush=True)
     print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
@@ -373,9 +356,8 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
 
         if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
-            print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
 
-        checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
+        checkpoint = load_checkpoint_sync(f"direct_{clean_folder_name}")
         local_processed = set(checkpoint.get('processed', []))
 
         hf_processed = set(hf_progress.get("uploaded_pdfs", []))
@@ -384,12 +366,12 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
 
         processed = list(all_processed)
 
-        async with running_tasks_lock:
+        with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["completed_pdfs"] = len(processed)
 
         for idx, url in enumerate(pdf_urls):
-            if shutdown_in_progress or await is_task_cancelled(task_id):
+            if shutdown_in_progress or is_task_cancelled(task_id):
                 break
 
             name_match = re.search(r'/(\d+)\.pdf', url)
@@ -408,7 +390,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
 
             try:
-                pages_processed, cancelled = await process_single_pdf(
+                pages_processed, cancelled = process_single_pdf_sync(
                     pdf, clean_folder_name, f"direct_{clean_folder_name}", checkpoint, task_id, idx+1, len(pdf_urls)
                 )
                 if cancelled:
@@ -416,17 +398,17 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
 
                 processed.append(pdf_name)
                 checkpoint['processed'] = list(set(checkpoint.get('processed', []) + [pdf_name]))
-                await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
+                save_checkpoint_sync(f"direct_{clean_folder_name}", checkpoint)
                 print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
 
-                async with running_tasks_lock:
+                with running_tasks_lock:
                     if task_id in running_tasks:
                         running_tasks[task_id]["completed_pdfs"] = len(processed)
                         running_tasks[task_id]["current_pdf"] = None
                         running_tasks[task_id]["current_page"] = 0
 
                 if idx < len(pdf_urls) - 1:
-                    await asyncio.sleep(PDF_SLEEP_BETWEEN)
+                    time.sleep(PDF_SLEEP_BETWEEN)
 
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
@@ -439,7 +421,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
         else:
             print(f"[INFO] ✅ All PDFs were already processed!", flush=True)
 
-        async with running_tasks_lock:
+        with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["status"] = "completed"
                 running_tasks[task_id]["completed_at"] = time.time()
@@ -447,12 +429,12 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
     except Exception as e:
         print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
-        async with running_tasks_lock:
+        with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)
 
-# ============ HTML টেমপ্লেট (আগের মতই) ============
+# ============ HTML টেমপ্লেট (সংক্ষিপ্ত - আগের মতই) ============
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="bn">
@@ -779,6 +761,8 @@ https://archive.org/details/20260415_20260415_0945`;
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global main_event_loop
+    main_event_loop = asyncio.get_event_loop()
     yield
     global shutdown_in_progress
     shutdown_in_progress = True
@@ -832,7 +816,7 @@ async def process_form(request: Request):
         pdf_urls.sort(key=extract_number)
 
         task_id = f"web_{int(time.time())}"
-        async with running_tasks_lock:
+        with running_tasks_lock:
             running_tasks[task_id] = {
                 "status": "running",
                 "started_at": time.time(),
@@ -844,12 +828,13 @@ async def process_form(request: Request):
                 "current_pdf_total_pages": 0,
                 "current_page": 0
             }
-        async with task_controls_lock:
+        with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
 
+        # 🔥 সিঙ্ক্রোনাস থ্রেড (কোনো asyncio নেই)
         thread = threading.Thread(
-            target=run_async_in_thread,
-            args=(process_pdf_urls, pdf_urls, book_name, task_id, 0),
+            target=process_pdf_urls_sync,
+            args=(pdf_urls, book_name, task_id),
             daemon=True
         )
         thread.start()
@@ -867,14 +852,14 @@ async def process_form(request: Request):
 
 @app.get("/tasks")
 async def get_tasks():
-    async with running_tasks_lock:
+    with running_tasks_lock:
         tasks_copy = {}
         for task_id, task_info in running_tasks.items():
             task_copy = task_info.copy()
 
             if task_info.get("folder_name"):
                 clean_name = task_info["folder_name"].replace(' ', '_')
-                checkpoint = await load_checkpoint(f"direct_{clean_name}")
+                checkpoint = load_checkpoint_sync(f"direct_{clean_name}")
 
                 processed = checkpoint.get('processed', [])
                 current = checkpoint.get('current')
@@ -895,7 +880,7 @@ async def get_tasks():
 
 @app.get("/cancel/{task_id}")
 async def cancel_task(task_id: str):
-    async with task_controls_lock:
+    with task_controls_lock:
         if task_id in task_controls:
             task_controls[task_id]["cancel"] = True
             return {"status": "cancelled"}
