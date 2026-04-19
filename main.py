@@ -214,7 +214,6 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
 def is_task_cancelled(task_id):
     with task_controls_lock:
         return task_controls.get(task_id, {}).get("cancel", False)
-
 def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pdfs):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
@@ -233,13 +232,14 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
     total_pages_processed = 0
 
     try:
+        # 🔥 প্রথমে শুধু পেজ কাউন্ট জানুন
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         doc.close()
         del doc
         gc.collect()
         
-        print(f"[INFO] {pdf['name']}: {total_pages} pages", flush=True)
+        print(f"[INFO] {pdf['name']}: {total_pages} pages [Mem: {get_memory_usage()}MB]", flush=True)
 
         with running_tasks_lock:
             if task_id in running_tasks:
@@ -251,10 +251,10 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 running_tasks[task_id]["system_memory"] = get_system_memory()
 
         batch_number = 1
+        BATCH_SIZE = 10  # ছোট ব্যাচ
         
         for batch_start in range(0, total_pages, BATCH_SIZE):
             if shutdown_in_progress or is_task_cancelled(task_id):
-                print(f"[INFO] Task cancelled", flush=True)
                 return total_pages_processed, True
             
             batch_end = min(batch_start + BATCH_SIZE, total_pages)
@@ -262,12 +262,12 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
             temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}_batch{batch_number}"
             temp_folder.mkdir(exist_ok=True)
             
-            print(f"[INFO] 📦 Batch {batch_number}: Pages {batch_start+1}-{batch_end} [Mem: {get_memory_usage()}MB]", flush=True)
+            print(f"[INFO] 📦 Batch {batch_number}: Pages {batch_start+1}-{batch_end} [Mem BEFORE: {get_memory_usage()}MB]", flush=True)
             
-            batch_doc = None
+            # 🔥🔥🔥 প্রতি ব্যাচে নতুন করে PDF খুলুন এবং সাথে সাথে বন্ধ করুন
+            batch_doc = fitz.open(pdf_path)
+            
             try:
-                batch_doc = fitz.open(pdf_path)
-                
                 for page_num in range(batch_start, batch_end):
                     page = batch_doc.load_page(page_num)
                     zoom = 4.0
@@ -283,19 +283,18 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                     with running_tasks_lock:
                         if task_id in running_tasks:
                             running_tasks[task_id]["current_page"] = page_num + 1
-                            running_tasks[task_id]["memory_usage"] = get_memory_usage()
                     
+                    # 🔥 প্রতিটি পৃষ্ঠার পর মেমরি খালি
                     del page
                     del pix
                     
-                    if (page_num - batch_start + 1) % 5 == 0:
+                    if (page_num - batch_start + 1) % 3 == 0:
                         gc.collect()
                 
+                # 🔥 PDF সাথে সাথে বন্ধ
                 batch_doc.close()
-                del batch_doc
-                gc.collect()
                 
-                print(f"[INFO] 📤 Uploading batch {batch_number}... [Mem: {get_memory_usage()}MB]", flush=True)
+                print(f"[INFO] 📤 Uploading batch {batch_number}... [Mem BEFORE upload: {get_memory_usage()}MB]", flush=True)
                 
                 upload_success = upload_folder_streaming_chunks(
                     str(temp_folder), 
@@ -304,18 +303,16 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 )
                 
                 if upload_success:
-                    print(f"[INFO] ✅ Batch {batch_number} uploaded", flush=True)
+                    print(f"[INFO] ✅ Batch {batch_number} uploaded [Mem AFTER upload: {get_memory_usage()}MB]", flush=True)
                     batch_number += 1
                 else:
                     raise Exception(f"Batch {batch_number} upload failed")
                     
             finally:
+                # 🔥🔥🔥 জোর করে মেমরি খালি
                 if batch_doc:
-                    try:
-                        batch_doc.close()
-                    except:
-                        pass
-                    del batch_doc
+                    batch_doc.close()
+                del batch_doc
                 
                 try:
                     if temp_folder.exists():
@@ -323,6 +320,8 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 except:
                     pass
                 
+                # 🔥 তিনবার GC
+                gc.collect()
                 gc.collect()
                 gc.collect()
                 
@@ -332,12 +331,10 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                         running_tasks[task_id]["system_memory"] = get_system_memory()
                 
                 if batch_end < total_pages:
-                    wait_time = 5
-                    print(f"[INFO] ⏸️ Pausing {wait_time}s... [Mem: {get_memory_usage()}MB]", flush=True)
+                    wait_time = 15  # বেশি অপেক্ষা
+                    print(f"[INFO] ⏸️ Pausing {wait_time}s... [Mem AFTER cleanup: {get_memory_usage()}MB]", flush=True)
                     time.sleep(wait_time)
 
-        print(f"[INFO] ✅ Complete: {pdf['name']} - {total_pages_processed} pages", flush=True)
-        
         return total_pages_processed, False
 
     finally:
@@ -346,6 +343,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
         except:
             pass
         gc.collect()
+
 
 def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
