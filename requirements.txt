@@ -7,3 +7,4 @@ mediafire
 PyMuPDF
 huggingface-hub
 python-telegram-bot
+psutil>=5.9.0
