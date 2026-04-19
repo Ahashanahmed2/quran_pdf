@@ -280,6 +280,9 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                 running_tasks[task_id]["current_page"] = start_page
 
         pages_processed = 0
+        batch_size = 100  # 🔥 প্রতি ১০০ পেজে আপলোড
+        batch_number = 1
+        
         for page_num in range(start_page, total_pages):
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 return pages_processed, True
@@ -299,23 +302,42 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                 if task_id in running_tasks:
                     running_tasks[task_id]["current_page"] = page_num + 1
 
+            # 🔥 প্রতি ১০০ পেজ বা শেষ পেজে আপলোড
+            if pages_processed % batch_size == 0 or page_num == total_pages - 1:
+                batch_end = page_num + 1
+                batch_start = batch_end - (pages_processed % batch_size if pages_processed % batch_size != 0 else batch_size) + 1
+                
+                print(f"[INFO] Uploading batch {batch_number}: pages {batch_start}-{batch_end}", flush=True)
+                
+                # বর্তমান ব্যাচের ফাইলগুলো আপলোড
+                batch_success = upload_folder_streaming_chunks(str(temp_folder), full_hf_path, f"{pdf['name']}_part{batch_number}")
+                
+                if batch_success:
+                    print(f"[INFO] ✅ Batch {batch_number} uploaded successfully", flush=True)
+                    # চেকপয়েন্ট আপডেট
+                    checkpoint['current'] = pdf['name']
+                    checkpoint['last_page'] = page_num
+                    await async_save_checkpoint(folder_key, checkpoint)
+                    
+                    # 🔥 আপলোডেড ফাইলগুলো ডিলিট করে মেমরি খালি
+                    for png_file in temp_folder.glob("*.png"):
+                        try:
+                            png_file.unlink()
+                        except:
+                            pass
+                    
+                    batch_number += 1
+                else:
+                    raise Exception(f"Batch {batch_number} upload failed")
+
             if page_num % 50 == 0:
-                checkpoint['current'] = pdf['name']
-                checkpoint['last_page'] = page_num
-                await async_save_checkpoint(folder_key, checkpoint)
                 print(f"[INFO] Progress: {page_num+1}/{total_pages} pages", flush=True)
 
         if pages_processed > 0:
-            print(f"[INFO] Uploading {pages_processed} images to HF...", flush=True)
-
-            upload_success = upload_folder_streaming_chunks(str(temp_folder), full_hf_path, pdf['name'])
-
-            if upload_success:
-                checkpoint['current'] = None
-                checkpoint['last_page'] = total_pages
-                await async_save_checkpoint(folder_key, checkpoint)
-            else:
-                raise Exception("HF upload failed")
+            print(f"[INFO] ✅ All {pages_processed} pages processed and uploaded in {batch_number-1} batches", flush=True)
+            checkpoint['current'] = None
+            checkpoint['last_page'] = total_pages
+            await async_save_checkpoint(folder_key, checkpoint)
 
         return pages_processed, False
 
