@@ -317,6 +317,7 @@ def update_task_progress(task_id, **kwargs):
                 running_tasks[task_id][key] = value
     save_tasks_to_file()
 
+
 def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pdfs, uploaded_pages=None):
     sub_folder = str(pdf['number'])
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
@@ -353,6 +354,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
 
         print(f"[INFO] {pdf['name']}: {total_pages} pages [Mem: {get_memory_usage()}MB]", flush=True)
 
+        # 🔥 uploaded_pages None বা খালি হলে start_page = 0
         start_page = 0
         if uploaded_pages and sub_folder in uploaded_pages:
             uploaded_set = uploaded_pages[sub_folder]
@@ -368,6 +370,8 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                             start_page = p - 1
                             break
                     print(f"[INFO] 📍 Partial upload detected, resuming from page {start_page + 1}", flush=True)
+        else:
+            print(f"[INFO] 📍 Starting from page 1 (no previous uploads or check disabled)", flush=True)
 
         update_task_progress(
             task_id,
@@ -409,6 +413,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                 batch_doc = fitz.open(pdf_path)
 
                 for page_num in range(batch_start, batch_end):
+                    # 🔥 uploaded_pages থাকলে এবং পৃষ্ঠা আগে আপলোড হলে স্কিপ
                     if uploaded_pages and sub_folder in uploaded_pages:
                         if (page_num + 1) in uploaded_pages[sub_folder]:
                             print(f"[INFO] ⏭️ Skipping page {page_num+1} (already uploaded)", flush=True)
@@ -512,7 +517,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
         fitz.TOOLS.store_shrink(0)
         fitz.TOOLS.reset_store()
         cleanup_old_temp_files()
-
+                
 
 def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
@@ -522,14 +527,8 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
     try:
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
 
-        print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
-        hf_progress = get_hf_folder_progress(clean_folder_name)
-
-        if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
-            print(f"[INFO] 📁 Folder already exists on HF with {hf_progress['total_uploaded']} PDF folders", flush=True)
-
-        hf_processed = set(hf_progress.get("uploaded_pdfs", []))
-        uploaded_pages = hf_progress.get("uploaded_pages", {})
+        # 🔥 HF চেক বাদ - সরাসরি শুরু
+        uploaded_pages = {}  # খালি ডিকশনারি - কোনো রিজিউম নয়
         processed_count = 0
 
         update_task_progress(
@@ -547,16 +546,13 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            if str(pdf_number) in hf_processed:
-                pages_uploaded = uploaded_pages.get(str(pdf_number), set())
-                print(f"[INFO] PDF {pdf_number} has {len(pages_uploaded)} pages uploaded, will check for missing pages", flush=True)
-
             pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
             print(f"[INFO] [{idx+1}/{len(pdf_urls)}] Starting {pdf_name}", flush=True)
 
             try:
+                # 🔥 uploaded_pages=None পাঠাচ্ছি - কোনো স্কিপ নয়
                 pages_processed, cancelled = process_single_pdf_sync(
-                    pdf, clean_folder_name, task_id, idx+1, len(pdf_urls), uploaded_pages
+                    pdf, clean_folder_name, task_id, idx+1, len(pdf_urls), uploaded_pages=None
                 )
                 if cancelled:
                     break
@@ -589,6 +585,15 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             completed_at=time.time(),
             completed_pdfs=processed_count,
             memory_usage=get_memory_usage()
+        )
+
+    except Exception as e:
+        print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
+        traceback.print_exc()
+        update_task_progress(
+            task_id,
+            status="failed",
+            error=str(e)
         )
 
     except Exception as e:
