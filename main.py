@@ -40,6 +40,7 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 MIN_FREE_SPACE_MB = 500
 MAX_JOB_RUNTIME = 12 * 3600
 PDF_SLEEP_BETWEEN = 3
+BATCH_SIZE = 100  # 🔥 প্রতি ব্যাচে ১০০ পৃষ্ঠা
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
@@ -135,7 +136,6 @@ def get_hf_folder_progress(hf_path: str) -> dict:
         for file in files:
             parts = file.rfilename.split('/')
             if len(parts) >= 2:
-                # parts[0] = ফোল্ডার নাম, parts[1] = PDF নম্বর
                 folder_name = parts[1] if parts[0] == hf_path else parts[0]
                 if folder_name.isdigit():
                     pdf_folders.add(folder_name)
@@ -187,7 +187,7 @@ def download_pdf_stream(url):
         raise e
 
 # ============ স্ট্রিমিং আপলোড ফাংশন ============
-def upload_folder_streaming_chunks(local_folder: str, hf_path: str, pdf_name: str):
+def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: str):
     """চাংক আকারে স্ট্রিমিং আপলোড - এক কমিটে"""
     try:
         png_files = sorted(Path(local_folder).glob("*.png"))
@@ -201,7 +201,6 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, pdf_name: st
         
         api = HfApi(token=HF_TOKEN)
         
-        # সবগুলো ফাইল একবারে অপারেশন লিস্টে যোগ করুন
         operations = []
         
         for idx, png_file in enumerate(png_files, 1):
@@ -220,14 +219,13 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, pdf_name: st
             if idx % 50 == 0:
                 print(f"[INFO] Prepared {idx}/{file_count} files", flush=True)
         
-        # একটাই কমিট - সব ফাইল একসাথে
         print(f"[INFO] Creating single commit with {len(operations)} files...", flush=True)
         
         api.create_commit(
             repo_id=HF_DATASET,
             repo_type="dataset",
             operations=operations,
-            commit_message=f"📚 {pdf_name} - {file_count} pages"
+            commit_message=f"📚 {batch_name} - {file_count} pages"
         )
         
         print(f"[INFO] ✅ Uploaded {file_count} images in single commit", flush=True)
@@ -264,8 +262,6 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
         return 0, False
 
     doc = None
-    temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}"
-    temp_folder.mkdir(exist_ok=True)
 
     try:
         doc = fitz.open(pdf_path)
@@ -280,65 +276,79 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                 running_tasks[task_id]["current_page"] = start_page
 
         pages_processed = 0
-        batch_size = 100  # 🔥 প্রতি ১০০ পেজে আপলোড
-        batch_number = 1
+        batch_number = (start_page // BATCH_SIZE) + 1
         
-        for page_num in range(start_page, total_pages):
+        # 🔥 ব্যাচ লুপ
+        for batch_start in range(start_page, total_pages, BATCH_SIZE):
             if shutdown_in_progress or await is_task_cancelled(task_id):
                 return pages_processed, True
-
-            page = doc.load_page(page_num)
-            zoom = 4.0  # 300 DPI হাই কোয়ালিটি
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-
-            img_name = f"page_{page_num+1:04d}.png"
-            tmp_path = temp_folder / img_name
-            pix.save(tmp_path)
-
-            pages_processed += 1
-
-            async with running_tasks_lock:
-                if task_id in running_tasks:
-                    running_tasks[task_id]["current_page"] = page_num + 1
-
-            # 🔥 প্রতি ১০০ পেজ বা শেষ পেজে আপলোড
-            if pages_processed % batch_size == 0 or page_num == total_pages - 1:
-                batch_end = page_num + 1
-                batch_start = batch_end - (pages_processed % batch_size if pages_processed % batch_size != 0 else batch_size) + 1
+            
+            batch_end = min(batch_start + BATCH_SIZE, total_pages)
+            
+            # 🔥 নতুন টেম্প ফোল্ডার
+            temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}_batch{batch_number}"
+            temp_folder.mkdir(exist_ok=True)
+            
+            print(f"[INFO] 📦 Batch {batch_number}: Generating pages {batch_start+1}-{batch_end}", flush=True)
+            
+            try:
+                # 🔥 ব্যাচের PNG জেনারেট
+                for page_num in range(batch_start, batch_end):
+                    page = doc.load_page(page_num)
+                    zoom = 4.0  # 300 DPI
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    
+                    img_name = f"page_{page_num+1:04d}.png"
+                    tmp_path = temp_folder / img_name
+                    pix.save(tmp_path)
+                    
+                    pages_processed += 1
+                    
+                    async with running_tasks_lock:
+                        if task_id in running_tasks:
+                            running_tasks[task_id]["current_page"] = page_num + 1
+                    
+                    # মেমরি ক্লিয়ার
+                    del pix
+                    gc.collect()
                 
-                print(f"[INFO] Uploading batch {batch_number}: pages {batch_start}-{batch_end}", flush=True)
+                # 🔥 ব্যাচ আপলোড
+                print(f"[INFO] 📤 Uploading batch {batch_number} ({batch_end-batch_start} pages)...", flush=True)
                 
-                # বর্তমান ব্যাচের ফাইলগুলো আপলোড
-                batch_success = upload_folder_streaming_chunks(str(temp_folder), full_hf_path, f"{pdf['name']}_part{batch_number}")
+                upload_success = upload_folder_streaming_chunks(
+                    str(temp_folder), 
+                    full_hf_path, 
+                    f"{pdf['name']}_batch{batch_number}"
+                )
                 
-                if batch_success:
-                    print(f"[INFO] ✅ Batch {batch_number} uploaded successfully", flush=True)
+                if upload_success:
+                    print(f"[INFO] ✅ Batch {batch_number} uploaded", flush=True)
+                    
                     # চেকপয়েন্ট আপডেট
                     checkpoint['current'] = pdf['name']
-                    checkpoint['last_page'] = page_num
+                    checkpoint['last_page'] = batch_end - 1
                     await async_save_checkpoint(folder_key, checkpoint)
-                    
-                    # 🔥 আপলোডেড ফাইলগুলো ডিলিট করে মেমরি খালি
-                    for png_file in temp_folder.glob("*.png"):
-                        try:
-                            png_file.unlink()
-                        except:
-                            pass
                     
                     batch_number += 1
                 else:
                     raise Exception(f"Batch {batch_number} upload failed")
+                    
+            finally:
+                # 🔥 টেম্প ফোল্ডার ক্লিনআপ (ফোর্সফুলি)
+                try:
+                    shutil.rmtree(temp_folder, ignore_errors=True)
+                except:
+                    pass
+                
+                # মেমরি ক্লিয়ার
+                gc.collect()
 
-            if page_num % 50 == 0:
-                print(f"[INFO] Progress: {page_num+1}/{total_pages} pages", flush=True)
-
-        if pages_processed > 0:
-            print(f"[INFO] ✅ All {pages_processed} pages processed and uploaded in {batch_number-1} batches", flush=True)
-            checkpoint['current'] = None
-            checkpoint['last_page'] = total_pages
-            await async_save_checkpoint(folder_key, checkpoint)
-
+        print(f"[INFO] ✅ Complete: {pdf['name']} - {pages_processed} pages", flush=True)
+        checkpoint['current'] = None
+        checkpoint['last_page'] = total_pages
+        await async_save_checkpoint(folder_key, checkpoint)
+        
         return pages_processed, False
 
     finally:
@@ -348,10 +358,7 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
             os.unlink(pdf_path)
         except:
             pass
-        try:
-            shutil.rmtree(temp_folder)
-        except:
-            pass
+        gc.collect()
 
 async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_id: int = 0):
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
@@ -359,10 +366,8 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
     print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
 
     try:
-        # টাইমস্ট্যাম্প ছাড়া ক্লিন ফোল্ডার নাম
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
 
-        # HF-এ আগে থেকে ফোল্ডার আছে কিনা চেক করুন
         print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
         hf_progress = get_hf_folder_progress(clean_folder_name)
 
@@ -370,18 +375,15 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
             print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
 
-        # চেকপয়েন্ট লোড
         checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
         local_processed = set(checkpoint.get('processed', []))
 
-        # HF + লোকাল চেকপয়েন্ট কম্বাইন
         hf_processed = set(hf_progress.get("uploaded_pdfs", []))
         all_processed = local_processed.union(hf_processed)
         print(f"[INFO] Total already processed: {len(all_processed)} PDFs", flush=True)
 
         processed = list(all_processed)
 
-        # টাস্ক স্ট্যাটাস আপডেট
         async with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["completed_pdfs"] = len(processed)
@@ -394,12 +396,10 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            # HF-এ আগে থেকেই থাকলে স্কিপ
             if str(pdf_number) in hf_processed:
                 print(f"[INFO] ⏭️ Skipping {pdf_name} (already on HF)", flush=True)
                 continue
 
-            # লোকাল চেকপয়েন্টে থাকলে স্কিপ
             if pdf_name in local_processed:
                 print(f"[INFO] ⏭️ Skipping {pdf_name} (already processed locally)", flush=True)
                 continue
@@ -452,7 +452,7 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
                 running_tasks[task_id]["status"] = "failed"
                 running_tasks[task_id]["error"] = str(e)
 
-# ============ HTML টেমপ্লেট ============
+# ============ HTML টেমপ্লেট (আগের মতই) ============
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="bn">
@@ -502,6 +502,10 @@ HTML_TEMPLATE = """
         .result.success {
             background: #d4edda; border: 1px solid #c3e6cb;
             color: #155724; display: block;
+        }
+        .result.error {
+            background: #f8d7da; border: 1px solid #f5c6cb;
+            color: #721c24; display: block;
         }
         .info-box {
             background: #e7f3ff; border: 1px solid #b8daff;
@@ -766,7 +770,7 @@ https://archive.org/details/20260415_20260415_0945`;
         });
 
         loadTasks();
-        setInterval(loadTasks, 5000);
+        setInterval(loadTasks, 3000);
     </script>
 </body>
 </html>
