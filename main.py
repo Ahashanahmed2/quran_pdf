@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form with HF Folder Check + Resume Support
+FastAPI + HTML Form with HF Folder Check + Resume Support + Memory Monitor
 """
 
 import os
@@ -27,6 +27,39 @@ from pydantic import BaseModel
 import fitz  # PyMuPDF
 from huggingface_hub import HfApi, CommitOperationAdd
 
+# ============ মেমরি মনিটর ============
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+def get_memory_usage():
+    """বর্তমান মেমরি ব্যবহার MB তে"""
+    if PSUTIL_AVAILABLE:
+        try:
+            process = psutil.Process()
+            mem = process.memory_info().rss / (1024 * 1024)
+            return round(mem, 1)
+        except:
+            pass
+    return 0
+
+def get_system_memory():
+    """সিস্টেম মেমরি তথ্য"""
+    if PSUTIL_AVAILABLE:
+        try:
+            mem = psutil.virtual_memory()
+            return {
+                "total": round(mem.total / (1024 * 1024), 0),
+                "available": round(mem.available / (1024 * 1024), 0),
+                "percent": mem.percent,
+                "used": round(mem.used / (1024 * 1024), 0)
+            }
+        except:
+            pass
+    return {"total": 0, "available": 0, "percent": 0, "used": 0}
+
 # ============ কনফিগারেশন ============
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HF_DATASET = os.environ.get("HF_DATASET")
@@ -40,7 +73,7 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 MIN_FREE_SPACE_MB = 500
 MAX_JOB_RUNTIME = 12 * 3600
 PDF_SLEEP_BETWEEN = 3
-BATCH_SIZE = 20  # ২০ পৃষ্ঠা করে ব্যাচ
+BATCH_SIZE = 20
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
@@ -98,7 +131,6 @@ def load_checkpoint_sync(folder_key):
 
 # ============ HF ফোল্ডার চেক ============
 def check_hf_folder_exists(hf_path: str) -> bool:
-    """HF Dataset-এ নির্দিষ্ট ফোল্ডার আছে কিনা চেক করুন"""
     try:
         api = HfApi(token=HF_TOKEN)
         files = api.list_files_info(
@@ -111,7 +143,6 @@ def check_hf_folder_exists(hf_path: str) -> bool:
         return False
 
 def get_hf_folder_progress(hf_path: str) -> dict:
-    """HF ফোল্ডার থেকে কোন PDF গুলো আপলোড হয়েছে তা বের করুন"""
     try:
         api = HfApi(token=HF_TOKEN)
         files = api.list_files_info(
@@ -176,7 +207,6 @@ def download_pdf_stream(url):
 
 # ============ স্ট্রিমিং আপলোড ফাংশন ============
 def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: str):
-    """চাংক আকারে স্ট্রিমিং আপলোড - এক কমিটে"""
     max_retries = 3
     
     for retry in range(max_retries):
@@ -188,7 +218,7 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
                 print(f"[ERROR] No PNG files found", flush=True)
                 return False
 
-            print(f"[INFO] Uploading {file_count} images (attempt {retry+1}/{max_retries}) to: {hf_path}", flush=True)
+            print(f"[INFO] Uploading {file_count} images (attempt {retry+1}/{max_retries})", flush=True)
             
             api = HfApi(token=HF_TOKEN)
             
@@ -219,7 +249,7 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
                 commit_message=f"📚 {batch_name} - {file_count} pages"
             )
             
-            print(f"[INFO] ✅ Uploaded {file_count} images in single commit", flush=True)
+            print(f"[INFO] ✅ Uploaded {file_count} images", flush=True)
             return True
             
         except Exception as e:
@@ -259,12 +289,15 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
         print(f"[ERROR] Download failed: {e}", flush=True)
         return 0, False
 
-    doc = None
     total_pages_processed = 0
 
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
+        doc.close()
+        del doc
+        gc.collect()
+        
         print(f"[INFO] {pdf['name']}: {total_pages} pages", flush=True)
 
         with running_tasks_lock:
@@ -273,12 +306,15 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
                 running_tasks[task_id]["current_pdf_index"] = pdf_index
                 running_tasks[task_id]["current_pdf_total_pages"] = total_pages
                 running_tasks[task_id]["current_page"] = start_page
+                # 🔥 মেমরি ব্যবহার আপডেট
+                running_tasks[task_id]["memory_usage"] = get_memory_usage()
+                running_tasks[task_id]["system_memory"] = get_system_memory()
 
         batch_number = (start_page // BATCH_SIZE) + 1
         
         for batch_start in range(start_page, total_pages, BATCH_SIZE):
             if shutdown_in_progress or is_task_cancelled(task_id):
-                print(f"[INFO] Task cancelled or shutdown", flush=True)
+                print(f"[INFO] Task cancelled", flush=True)
                 return total_pages_processed, True
             
             batch_end = min(batch_start + BATCH_SIZE, total_pages)
@@ -286,13 +322,15 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
             temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}_batch{batch_number}"
             temp_folder.mkdir(exist_ok=True)
             
-            print(f"[INFO] 📦 Batch {batch_number}: Generating pages {batch_start+1}-{batch_end}", flush=True)
+            print(f"[INFO] 📦 Batch {batch_number}: Pages {batch_start+1}-{batch_end} [Mem: {get_memory_usage()}MB]", flush=True)
             
+            batch_doc = None
             try:
-                # ব্যাচের PNG জেনারেট
+                batch_doc = fitz.open(pdf_path)
+                
                 for page_num in range(batch_start, batch_end):
-                    page = doc.load_page(page_num)
-                    zoom = 4.0  # 300 DPI
+                    page = batch_doc.load_page(page_num)
+                    zoom = 4.0
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat, alpha=False)
                     
@@ -305,14 +343,19 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
                     with running_tasks_lock:
                         if task_id in running_tasks:
                             running_tasks[task_id]["current_page"] = page_num + 1
+                            running_tasks[task_id]["memory_usage"] = get_memory_usage()
                     
+                    del page
                     del pix
                     
-                    # প্রতি ৫ পৃষ্ঠায় GC
                     if (page_num - batch_start + 1) % 5 == 0:
                         gc.collect()
                 
-                print(f"[INFO] 📤 Uploading batch {batch_number} ({batch_end-batch_start} pages)...", flush=True)
+                batch_doc.close()
+                del batch_doc
+                gc.collect()
+                
+                print(f"[INFO] 📤 Uploading batch {batch_number}... [Mem: {get_memory_usage()}MB]", flush=True)
                 
                 upload_success = upload_folder_streaming_chunks(
                     str(temp_folder), 
@@ -323,46 +366,43 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
                 if upload_success:
                     print(f"[INFO] ✅ Batch {batch_number} uploaded", flush=True)
                     
-                    # চেকপয়েন্ট আপডেট
                     try:
                         checkpoint['current'] = pdf['name']
                         checkpoint['last_page'] = batch_end - 1
                         save_checkpoint_sync(folder_key, checkpoint)
-                        print(f"[INFO] Checkpoint saved: page {batch_end}", flush=True)
                     except Exception as e:
                         print(f"[ERROR] Checkpoint save failed: {e}", flush=True)
                     
                     batch_number += 1
                 else:
-                    print(f"[ERROR] ❌ Batch {batch_number} upload failed after retries", flush=True)
-                    # চেকপয়েন্ট সেভ করে রাখি যাতে রেজিউম করা যায়
-                    try:
-                        checkpoint['current'] = pdf['name']
-                        checkpoint['last_page'] = batch_start - 1
-                        save_checkpoint_sync(folder_key, checkpoint)
-                    except:
-                        pass
                     raise Exception(f"Batch {batch_number} upload failed")
                     
-            except Exception as e:
-                print(f"[ERROR] Batch {batch_number} error: {e}", flush=True)
-                traceback.print_exc()
-                raise
-                
             finally:
-                # টেম্প ফোল্ডার ক্লিনআপ
+                if batch_doc:
+                    try:
+                        batch_doc.close()
+                    except:
+                        pass
+                    del batch_doc
+                
                 try:
                     if temp_folder.exists():
                         shutil.rmtree(temp_folder, ignore_errors=True)
-                except Exception as e:
-                    print(f"[WARN] Failed to cleanup temp folder: {e}", flush=True)
+                except:
+                    pass
                 
                 gc.collect()
+                gc.collect()
                 
-                # ব্যাচের মাঝে বিরতি
+                # 🔥 মেমরি আপডেট
+                with running_tasks_lock:
+                    if task_id in running_tasks:
+                        running_tasks[task_id]["memory_usage"] = get_memory_usage()
+                        running_tasks[task_id]["system_memory"] = get_system_memory()
+                
                 if batch_end < total_pages:
                     wait_time = 5
-                    print(f"[INFO] ⏸️ Waiting {wait_time} seconds before next batch...", flush=True)
+                    print(f"[INFO] ⏸️ Pausing {wait_time}s... [Mem: {get_memory_usage()}MB]", flush=True)
                     time.sleep(wait_time)
 
         print(f"[INFO] ✅ Complete: {pdf['name']} - {total_pages_processed} pages", flush=True)
@@ -373,8 +413,6 @@ def process_single_pdf_sync(pdf, clean_folder_name, folder_key, checkpoint, task
         return total_pages_processed, False
 
     finally:
-        if doc:
-            doc.close()
         try:
             os.unlink(pdf_path)
         except:
@@ -394,7 +432,6 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
 
         if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
-            print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
 
         checkpoint = load_checkpoint_sync(f"direct_{clean_folder_name}")
         local_processed = set(checkpoint.get('processed', []))
@@ -408,6 +445,8 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
         with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["completed_pdfs"] = len(processed)
+                running_tasks[task_id]["memory_usage"] = get_memory_usage()
+                running_tasks[task_id]["system_memory"] = get_system_memory()
 
         for idx, url in enumerate(pdf_urls):
             if shutdown_in_progress or is_task_cancelled(task_id):
@@ -445,6 +484,7 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
                         running_tasks[task_id]["completed_pdfs"] = len(processed)
                         running_tasks[task_id]["current_pdf"] = None
                         running_tasks[task_id]["current_page"] = 0
+                        running_tasks[task_id]["memory_usage"] = get_memory_usage()
 
                 if idx < len(pdf_urls) - 1:
                     time.sleep(PDF_SLEEP_BETWEEN)
@@ -465,6 +505,7 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
                 running_tasks[task_id]["status"] = "completed"
                 running_tasks[task_id]["completed_at"] = time.time()
                 running_tasks[task_id]["completed_pdfs"] = len(processed)
+                running_tasks[task_id]["memory_usage"] = get_memory_usage()
     except Exception as e:
         print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
@@ -568,6 +609,21 @@ HTML_TEMPLATE = """
             margin-top: 10px; padding: 10px; background: white;
             border-radius: 8px; border: 1px solid #dee2e6;
         }
+        .memory-info {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; padding: 8px 12px; border-radius: 8px;
+            margin-top: 10px; font-size: 13px;
+        }
+        .memory-bar-container {
+            background: rgba(255,255,255,0.3); height: 8px;
+            border-radius: 4px; margin-top: 5px; overflow: hidden;
+        }
+        .memory-bar {
+            background: #ffd700; height: 8px; border-radius: 4px;
+            width: 0%; transition: width 0.3s;
+        }
+        .memory-warning { color: #ff9800; }
+        .memory-critical { color: #f44336; }
     </style>
 </head>
 <body>
@@ -641,6 +697,29 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `<div style="margin-top: 8px;">`;
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
+                        
+                        // 🔥 মেমরি ইনফো
+                        if (task.memory_usage) {
+                            const memUsage = task.memory_usage;
+                            const sysMem = task.system_memory || { total: 512, available: 0, percent: 0 };
+                            const memPercent = sysMem.total > 0 ? (memUsage / sysMem.total) * 100 : 0;
+                            let memClass = '';
+                            if (memPercent > 80) memClass = 'memory-critical';
+                            else if (memPercent > 60) memClass = 'memory-warning';
+                            
+                            html += `<div class="memory-info">`;
+                            html += `💾 মেমরি: ${memUsage} MB`;
+                            if (sysMem.total > 0) {
+                                html += ` / ${sysMem.total} MB (${sysMem.percent}%)`;
+                            }
+                            html += `<div class="memory-bar-container">
+                                <div class="memory-bar" style="width: ${memPercent}%;"></div>
+                            </div>`;
+                            if (sysMem.available > 0) {
+                                html += `<small>✅ উপলব্ধ: ${sysMem.available} MB</small>`;
+                            }
+                            html += `</div>`;
+                        }
                         
                         if (task.total_pdfs) {
                             const completed = task.completed_pdfs || 0;
@@ -820,10 +899,17 @@ async def health():
 
 @app.get("/check-folder/{folder_name}")
 async def check_folder(folder_name: str):
-    """HF-এ ফোল্ডার চেক করুন"""
     clean_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
     progress = get_hf_folder_progress(clean_name)
     return progress
+
+@app.get("/memory")
+async def get_memory():
+    """মেমরি ব্যবহার API"""
+    return {
+        "process_mb": get_memory_usage(),
+        "system": get_system_memory()
+    }
 
 @app.post("/process")
 async def process_form(request: Request):
@@ -863,7 +949,9 @@ async def process_form(request: Request):
                 "current_pdf": None,
                 "current_pdf_index": 0,
                 "current_pdf_total_pages": 0,
-                "current_page": 0
+                "current_page": 0,
+                "memory_usage": get_memory_usage(),
+                "system_memory": get_system_memory()
             }
         with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
@@ -909,6 +997,10 @@ async def get_tasks():
                 if current and last_page > 0:
                     task_copy["current_pdf"] = current
                     task_copy["current_page"] = last_page
+
+            # 🔥 মেমরি ইনফো সবসময় আপডেট
+            task_copy["memory_usage"] = get_memory_usage()
+            task_copy["system_memory"] = get_system_memory()
 
             tasks_copy[task_id] = task_copy
 
