@@ -749,31 +749,34 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `<div style="margin-top: 8px;">`;
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
-                        if (task.memory_usage !== undefined && task.memory_usage !== null) {
-                            const memUsage = task.memory_usage;
-                            const sysMem = task.system_memory || { total: 512, percent: 0, available: 0 };
-                            const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
-                            
-                            let memColor = '#00d2ff';
-                            let warningBadge = '';
-                            if (memPercent > 85) {
-                                memColor = '#dc3545';
-                                warningBadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
-                            } else if (memPercent > 70) {
-                                memColor = '#ff9800';
-                                warningBadge = '<span class="memory-warning">⚠️ সতর্কতা</span>';
-                            }
-                            
-                            html += `<div class="memory-info">`;
-                            html += `💾 মেমরি: ${memUsage} MB / ${sysMem.total} MB (${memPercent}%) ${warningBadge}<br>`;
-                            html += `<div class="memory-bar-container">
-                                <div class="memory-bar" style="width: ${memPercent}%; background: ${memColor};"></div>
-                            </div>`;
-                            if (sysMem.available > 0) {
-                                html += `<small>✅ উপলব্ধ: ${sysMem.available} MB</small>`;
-                            }
-                            html += `</div>`;
-                        }
+                          // ✅ মেমরি বার - সবসময় দেখানোর জন্য
+                const memUsage = task.memory_usage || 0;
+                const sysMem = task.system_memory || { total: 525, percent: 0, available: 0 };
+                const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
+                
+                let memColor = '#00d2ff';
+                let warningBadge = '';
+                if (memPercent > 85) {
+                    memColor = '#dc3545';
+                    warningBadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
+                } else if (memPercent > 70) {
+                    memColor = '#ff9800';
+                    warningBadge = '<span class="memory-warning">⚠️ সতর্কতা</span>';
+                }
+                
+                html += `<div class="memory-info">`;
+                html += `💾 মেমরি: ${memUsage} MB / ${sysMem.total} MB (${memPercent}%) ${warningBadge}<br>`;
+                html += `<div class="memory-bar-container">
+                    <div class="memory-bar" style="width: ${memPercent}%; background: ${memColor};"></div>
+                </div>`;
+                if (sysMem.available > 0) {
+                    html += `<small>✅ উপলব্ধ: ${sysMem.available} MB</small>`;
+                } else {
+                    html += `<small>📊 Render.com ফ্রি টায়ার (৫২৫ MB)</small>`;
+                }
+                html += `</div>`;
+                
+                // বাকি কোড আগের মত...
                         
                         if (task.total_pdfs) {
                             const completed = task.completed_pdfs || 0;
