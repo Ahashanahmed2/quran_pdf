@@ -69,11 +69,11 @@ HF_DATASET = os.environ.get("HF_DATASET")
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
-MIN_FREE_SPACE_MB = 500
+MIN_FREE_SPACE_MB = 40
 PDF_SLEEP_BETWEEN = 3
-PDF_BATCH_SIZE = 24
-MAX_FILES_PER_COMMIT = 25
-MAX_CONCURRENT_TASKS = 1
+PDF_BATCH_SIZE = 30
+MAX_FILES_PER_COMMIT = 31
+MAX_CONCURRENT_TASKS = 2
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
@@ -82,6 +82,35 @@ running_tasks_lock = threading.Lock()
 task_controls = {}
 task_controls_lock = threading.Lock()
 shutdown_in_progress = False
+
+# 🔥 BUG FIX: টাস্ক ফাইল সংরক্ষণের জন্য
+TASKS_FILE = Path("/tmp/tafsir_running_tasks.json")
+
+def save_tasks_to_file():
+    """চলমান টাস্ক ফাইলে সংরক্ষণ করুন"""
+    try:
+        with running_tasks_lock:
+            tasks_to_save = {}
+            for task_id, task_info in running_tasks.items():
+                task_copy = task_info.copy()
+                # থ্রেড অবজেক্ট JSON সিরিয়ালাইজ করা যায় না
+                if "thread" in task_copy:
+                    del task_copy["thread"]
+                tasks_to_save[task_id] = task_copy
+        with open(TASKS_FILE, 'w') as f:
+            json.dump(tasks_to_save, f)
+    except Exception as e:
+        print(f"[WARN] Could not save tasks to file: {e}", flush=True)
+
+def load_tasks_from_file():
+    """ফাইল থেকে পূর্বের টাস্ক লোড করুন"""
+    try:
+        if TASKS_FILE.exists():
+            with open(TASKS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[WARN] Could not load tasks from file: {e}", flush=True)
+    return {}
 
 # SSL কনটেক্সট
 ssl_context = ssl.create_default_context()
@@ -271,6 +300,8 @@ def update_task_progress(task_id, **kwargs):
         if task_id in running_tasks:
             for key, value in kwargs.items():
                 running_tasks[task_id][key] = value
+    # 🔥 BUG FIX: টাস্ক আপডেটের পর ফাইলেও সংরক্ষণ করুন
+    save_tasks_to_file()
 
 def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pdfs, uploaded_pages=None):
     sub_folder = str(pdf['number'])
@@ -551,6 +582,11 @@ def process_pdf_urls_sync(pdf_urls: list, folder_name: str, task_id: str):
             completed_pdfs=processed_count,
             memory_usage=get_memory_usage()
         )
+        
+        # 🔥 BUG FIX: টাস্ক সম্পন্ন হলে ফাইল থেকে মুছে ফেলুন (ঐচ্ছিক)
+        # completed হলে ফাইল থেকে ডিলিট করতে চাইলে নিচের লাইন আনকমেন্ট করুন
+        # cleanup_completed_task(task_id)
+        
     except Exception as e:
         print(f"[DEBUG] FATAL ERROR: {e}", flush=True)
         traceback.print_exc()
@@ -752,7 +788,7 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         
                         // ✅ মেমরি বার - Render.com ফ্রি টায়ার লিমিট (৫২৫ MB)
                         const memUsage = task.memory_usage || 0;
-                        const RENDER_LIMIT = 525;  // Render.com ফ্রি টায়ার লিমিট
+                        const RENDER_LIMIT = 525;
                         const memPercent = Math.round((memUsage / RENDER_LIMIT) * 100);
                         const available = RENDER_LIMIT - memUsage;
                         
@@ -932,9 +968,22 @@ https://archive.org/details/20260415_20260415_0945`;
 # ============ FastAPI অ্যাপ ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 🔥 BUG FIX: সার্ভার স্টার্ট হলে পূর্বের টাস্ক লোড করুন
+    global running_tasks
+    saved_tasks = load_tasks_from_file()
+    if saved_tasks:
+        with running_tasks_lock:
+            for task_id, task_info in saved_tasks.items():
+                if task_info.get("status") == "running":
+                    task_info["status"] = "interrupted"  # সার্ভার রিস্টার্ট হলে ইন্টারাপ্টেড মার্ক করুন
+                running_tasks[task_id] = task_info
+        print(f"[INFO] Loaded {len(saved_tasks)} tasks from file", flush=True)
+    
     yield
     global shutdown_in_progress
     shutdown_in_progress = True
+    # 🔥 BUG FIX: শাটডাউনের আগে টাস্ক সংরক্ষণ করুন
+    save_tasks_to_file()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -1013,6 +1062,9 @@ async def process_form(request: Request):
         with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
 
+        # 🔥 BUG FIX: টাস্ক শুরু হলে ফাইলেও সংরক্ষণ করুন
+        save_tasks_to_file()
+
         # 🔥 FIX 1: Use asyncio.to_thread instead of raw threading
         asyncio.create_task(
             asyncio.to_thread(process_pdf_urls_sync, pdf_urls, book_name, task_id)
@@ -1035,8 +1087,6 @@ async def get_tasks():
         tasks_copy = {}
         for task_id, task_info in running_tasks.items():
             task_copy = task_info.copy()
-            # ✅ ব্যাকগ্রাউন্ড থেকে সংরক্ষিত মেমরি ডাটা ব্যবহার করবে
-            # যদি না থাকে তবেই নতুন করে চেক করবে
             if "memory_usage" not in task_copy or task_copy["memory_usage"] == 0:
                 task_copy["memory_usage"] = get_memory_usage()
             if "system_memory" not in task_copy:
@@ -1044,7 +1094,18 @@ async def get_tasks():
             if "thread" in task_copy:
                 del task_copy["thread"]
             tasks_copy[task_id] = task_copy
-        return tasks_copy
+    
+    # 🔥 BUG FIX: যদি মেমরিতে টাস্ক না থাকে, ফাইল থেকে লোড করুন
+    if not tasks_copy:
+        tasks_copy = load_tasks_from_file()
+        # ফাইল থেকে লোড করা টাস্ক মেমরিতে রিস্টোর করুন
+        if tasks_copy:
+            with running_tasks_lock:
+                for task_id, task_info in tasks_copy.items():
+                    if task_id not in running_tasks:
+                        running_tasks[task_id] = task_info
+    
+    return tasks_copy
 
 @app.get("/cancel/{task_id}")
 async def cancel_task(task_id: str):
