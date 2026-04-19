@@ -372,7 +372,7 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                     page = batch_doc.load_page(page_num)
                     zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
                     mat = fitz.Matrix(zoom, zoom)
-                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    pix = page.get_pixmap(dpi=300, alpha=False)
 
                     img_name = f"page_{page_num+1:04d}.png"
                     tmp_path = temp_folder / img_name
