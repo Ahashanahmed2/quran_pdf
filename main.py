@@ -84,7 +84,7 @@ task_controls_lock = threading.Lock()
 shutdown_in_progress = False
 
 # SSL কনটেক্সট
-ssl_context = ssl.create_defaultcontext()
+ssl_context = ssl.create_default_context()
 
 class ProcessRequest(BaseModel):
     book_name: str
