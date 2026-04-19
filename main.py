@@ -789,10 +789,10 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                             </div>`;
                             
                             if (task.current_pdf) {
-                                const currentPage = task.current_page || 0;
-                                const totalPages = task.current_pdf_total_pages || 0;
-                                const pagePercent = totalPages > 0 ? Math.round(currentPage * 100 / totalPages) : 0;
-                                
+                                // UI JavaScript-এ পরিবর্তন:
+                                const sysMem = task.system_memory || { total: 525, percent: 0, available: 0 };
+                                const displayTotal = 525;  // Render.com ফ্রি টায়ার লিমিট
+                                const memPercent = Math.round((memUsage / displayTotal) * 100);
                                 html += `<div class="page-progress">`;
                                 html += `🔄 <strong>চলমান:</strong> ${task.current_pdf} (${task.current_pdf_index}/${task.total_pdfs})<br>`;
                                 html += `📄 <strong>পৃষ্ঠা:</strong> ${currentPage} / ${totalPages}<br>`;
