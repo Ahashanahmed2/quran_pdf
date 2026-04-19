@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import fitz  # PyMuPDF
-from huggingface_hub import HfApi, upload_file
+from huggingface_hub import HfApi, CommitOperationAdd
 
 # ============ কনফিগারেশন ============
 HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -130,7 +130,7 @@ def get_hf_folder_progress(hf_path: str) -> dict:
             repo_type="dataset",
             path=hf_path
         )
-        
+
         pdf_folders = set()
         for file in files:
             parts = file.rfilename.split('/')
@@ -139,7 +139,7 @@ def get_hf_folder_progress(hf_path: str) -> dict:
                 folder_name = parts[1] if parts[0] == hf_path else parts[0]
                 if folder_name.isdigit():
                     pdf_folders.add(folder_name)
-        
+
         return {
             "exists": True,
             "uploaded_pdfs": sorted(list(pdf_folders)),
@@ -152,7 +152,7 @@ def get_hf_folder_progress(hf_path: str) -> dict:
 # ============ PDF ডাউনলোড ============
 def download_pdf_stream(url):
     print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
-    
+
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     try:
         headers = {
@@ -160,9 +160,9 @@ def download_pdf_stream(url):
             'Accept': 'application/pdf,application/octet-stream,*/*',
             'Referer': 'https://archive.org/'
         }
-        
+
         req = urllib.request.Request(url, headers=headers)
-        
+
         with urllib.request.urlopen(req, context=ssl_context, timeout=300) as response:
             total_size = 0
             while True:
@@ -171,12 +171,12 @@ def download_pdf_stream(url):
                     break
                 temp_file.write(chunk)
                 total_size += len(chunk)
-            
+
             print(f"[DEBUG] Downloaded: {total_size} bytes", flush=True)
-        
+
         temp_file.close()
         return temp_file.name
-        
+
     except Exception as e:
         print(f"[DEBUG] Download error: {e}", flush=True)
         temp_file.close()
@@ -186,27 +186,51 @@ def download_pdf_stream(url):
             pass
         raise e
 
-# ============ বাল্ক ফোল্ডার আপলোড ============
-def upload_folder_to_hf(local_folder: str, hf_path: str):
-    """সম্পূর্ণ ফোল্ডার একসাথে HF-এ আপলোড করুন"""
+# ============ স্ট্রিমিং আপলোড ফাংশন ============
+def upload_folder_streaming_chunks(local_folder: str, hf_path: str, pdf_name: str):
+    """চাংক আকারে স্ট্রিমিং আপলোড - এক কমিটে"""
     try:
-        png_files = list(Path(local_folder).glob("*.png"))
+        png_files = sorted(Path(local_folder).glob("*.png"))
         file_count = len(png_files)
-        print(f"[INFO] Uploading {file_count} images to: {hf_path}", flush=True)
         
         if file_count == 0:
             print(f"[ERROR] No PNG files found", flush=True)
             return False
+
+        print(f"[INFO] Uploading {file_count} images to: {hf_path}", flush=True)
         
         api = HfApi(token=HF_TOKEN)
-        api.upload_folder(
-            folder_path=local_folder,
-            path_in_repo=hf_path,
+        
+        # সবগুলো ফাইল একবারে অপারেশন লিস্টে যোগ করুন
+        operations = []
+        
+        for idx, png_file in enumerate(png_files, 1):
+            remote_path = f"{hf_path}/{png_file.name}"
+            
+            with open(png_file, 'rb') as f:
+                content = f.read()
+            
+            operations.append(
+                CommitOperationAdd(
+                    path_in_repo=remote_path,
+                    path_or_fileobj=content
+                )
+            )
+            
+            if idx % 50 == 0:
+                print(f"[INFO] Prepared {idx}/{file_count} files", flush=True)
+        
+        # একটাই কমিট - সব ফাইল একসাথে
+        print(f"[INFO] Creating single commit with {len(operations)} files...", flush=True)
+        
+        api.create_commit(
             repo_id=HF_DATASET,
-            repo_type="dataset"
+            repo_type="dataset",
+            operations=operations,
+            commit_message=f"📚 {pdf_name} - {file_count} pages"
         )
         
-        print(f"[INFO] ✅ Uploaded {file_count} images", flush=True)
+        print(f"[INFO] ✅ Uploaded {file_count} images in single commit", flush=True)
         return True
         
     except Exception as e:
@@ -242,12 +266,12 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
     doc = None
     temp_folder = TEMP_DIR / f"{task_id}_{pdf['number']}"
     temp_folder.mkdir(exist_ok=True)
-    
+
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         print(f"[INFO] {pdf['name']}: {total_pages} pages", flush=True)
-        
+
         async with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["current_pdf"] = pdf['name']
@@ -261,17 +285,13 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                 return pages_processed, True
 
             page = doc.load_page(page_num)
-            zoom = 300 / 72
+            zoom = 4.0  # 300 DPI হাই কোয়ালিটি
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
-            img_bytes = pix.tobytes("png")
-            
             img_name = f"page_{page_num+1:04d}.png"
             tmp_path = temp_folder / img_name
-
-            with open(tmp_path, 'wb') as f:
-                f.write(img_bytes)
+            pix.save(tmp_path)
 
             pages_processed += 1
 
@@ -287,24 +307,18 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
 
         if pages_processed > 0:
             print(f"[INFO] Uploading {pages_processed} images to HF...", flush=True)
-            
-            upload_success = False
-            for retry in range(3):
-                if upload_folder_to_hf(str(temp_folder), full_hf_path):
-                    upload_success = True
-                    break
-                print(f"[WARN] Upload retry {retry+1}/3", flush=True)
-                time.sleep(5)
-            
+
+            upload_success = upload_folder_streaming_chunks(str(temp_folder), full_hf_path, pdf['name'])
+
             if upload_success:
                 checkpoint['current'] = None
                 checkpoint['last_page'] = total_pages
                 await async_save_checkpoint(folder_key, checkpoint)
             else:
-                raise Exception("HF upload failed after 3 retries")
+                raise Exception("HF upload failed")
 
         return pages_processed, False
-        
+
     finally:
         if doc:
             doc.close()
@@ -323,28 +337,28 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
     print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
 
     try:
-        # 🔥 টাইমস্ট্যাম্প ছাড়া ক্লিন ফোল্ডার নাম
+        # টাইমস্ট্যাম্প ছাড়া ক্লিন ফোল্ডার নাম
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
-        
-        # 🔥 HF-এ আগে থেকে ফোল্ডার আছে কিনা চেক করুন
+
+        # HF-এ আগে থেকে ফোল্ডার আছে কিনা চেক করুন
         print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
         hf_progress = get_hf_folder_progress(clean_folder_name)
-        
+
         if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
             print(f"[INFO] 📁 Folder already exists on HF", flush=True)
             print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
-        
+
         # চেকপয়েন্ট লোড
         checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
         local_processed = set(checkpoint.get('processed', []))
-        
+
         # HF + লোকাল চেকপয়েন্ট কম্বাইন
         hf_processed = set(hf_progress.get("uploaded_pdfs", []))
         all_processed = local_processed.union(hf_processed)
         print(f"[INFO] Total already processed: {len(all_processed)} PDFs", flush=True)
-        
+
         processed = list(all_processed)
-        
+
         # টাস্ক স্ট্যাটাস আপডেট
         async with running_tasks_lock:
             if task_id in running_tasks:
@@ -358,12 +372,12 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            # 🔥 HF-এ আগে থেকেই থাকলে স্কিপ
+            # HF-এ আগে থেকেই থাকলে স্কিপ
             if str(pdf_number) in hf_processed:
                 print(f"[INFO] ⏭️ Skipping {pdf_name} (already on HF)", flush=True)
                 continue
-            
-            # 🔥 লোকাল চেকপয়েন্টে থাকলে স্কিপ
+
+            # লোকাল চেকপয়েন্টে থাকলে স্কিপ
             if pdf_name in local_processed:
                 print(f"[INFO] ⏭️ Skipping {pdf_name} (already processed locally)", flush=True)
                 continue
@@ -382,16 +396,16 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_
                 checkpoint['processed'] = list(set(checkpoint.get('processed', []) + [pdf_name]))
                 await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
                 print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
-                
+
                 async with running_tasks_lock:
                     if task_id in running_tasks:
                         running_tasks[task_id]["completed_pdfs"] = len(processed)
                         running_tasks[task_id]["current_pdf"] = None
                         running_tasks[task_id]["current_page"] = 0
-                
+
                 if idx < len(pdf_urls) - 1:
                     await asyncio.sleep(PDF_SLEEP_BETWEEN)
-                    
+
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
                 traceback.print_exc()
@@ -770,10 +784,10 @@ async def process_form(request: Request):
         data = await request.json()
         book_name = data.get('book_name', f"tafsir_{int(time.time())}")
         urls = data.get('urls', [])
-        
+
         if not urls:
             return {"status": "error", "message": "কোনো লিংক দেওয়া হয়নি"}
-        
+
         pdf_urls = []
         for url in urls:
             if 'archive.org/details/' in url:
@@ -782,15 +796,15 @@ async def process_form(request: Request):
                     pdf_urls.append(f"https://archive.org/download/{item_id}/{i}.pdf")
             else:
                 pdf_urls.append(url)
-        
+
         if not pdf_urls:
             return {"status": "error", "message": "কোনো বৈধ PDF লিংক পাওয়া যায়নি"}
-        
+
         def extract_number(url):
             match = re.search(r'/(\d+)\.pdf', url)
             return int(match.group(1)) if match else 999
         pdf_urls.sort(key=extract_number)
-        
+
         task_id = f"web_{int(time.time())}"
         async with running_tasks_lock:
             running_tasks[task_id] = {
@@ -806,7 +820,7 @@ async def process_form(request: Request):
             }
         async with task_controls_lock:
             task_controls[task_id] = {"cancel": False}
-        
+
         thread = threading.Thread(
             target=run_async_in_thread,
             args=(process_pdf_urls, pdf_urls, book_name, task_id, 0),
@@ -814,7 +828,7 @@ async def process_form(request: Request):
         )
         thread.start()
         print(f"[DEBUG] Thread started for task {task_id}", flush=True)
-        
+
         return {
             "status": "started",
             "book_name": book_name,
@@ -831,26 +845,26 @@ async def get_tasks():
         tasks_copy = {}
         for task_id, task_info in running_tasks.items():
             task_copy = task_info.copy()
-            
+
             if task_info.get("folder_name"):
                 clean_name = task_info["folder_name"].replace(' ', '_')
                 checkpoint = await load_checkpoint(f"direct_{clean_name}")
-                
+
                 processed = checkpoint.get('processed', [])
                 current = checkpoint.get('current')
                 last_page = checkpoint.get('last_page', 0)
-                
+
                 task_copy["completed_pdfs"] = len(processed)
-                
+
                 if task_copy["total_pdfs"] > 0:
                     task_copy["percent"] = round(len(processed) * 100 / task_copy["total_pdfs"], 1)
-                
+
                 if current and last_page > 0:
                     task_copy["current_pdf"] = current
                     task_copy["current_page"] = last_page
-            
+
             tasks_copy[task_id] = task_copy
-        
+
         return tasks_copy
 
 @app.get("/cancel/{task_id}")
