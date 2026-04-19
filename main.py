@@ -749,8 +749,7 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `<div style="margin-top: 8px;">`;
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
-                        
-                        if (task.memory_usage && task.memory_usage > 0) {
+                        if (task.memory_usage !== undefined && task.memory_usage !== null) {
                             const memUsage = task.memory_usage;
                             const sysMem = task.system_memory || { total: 512, percent: 0, available: 0 };
                             const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
