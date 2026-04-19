@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI + HTML Form with Live Page-by-Page Progress + Bulk Folder Upload
+FastAPI + HTML Form with HF Folder Check + Resume Support
 """
 
 import os
@@ -38,7 +38,8 @@ CHECKPOINT_DIR = Path("/tmp/checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 MIN_FREE_SPACE_MB = 500
-MAX_JOB_RUNTIME = 6 * 3600
+MAX_JOB_RUNTIME = 12 * 3600
+PDF_SLEEP_BETWEEN = 3
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
@@ -106,6 +107,48 @@ async def load_checkpoint(folder_key):
         pass
     return {"processed": [], "current": None, "last_page": 0}
 
+# ============ HF ফোল্ডার চেক ============
+def check_hf_folder_exists(hf_path: str) -> bool:
+    """HF Dataset-এ নির্দিষ্ট ফোল্ডার আছে কিনা চেক করুন"""
+    try:
+        api = HfApi(token=HF_TOKEN)
+        files = api.list_files_info(
+            repo_id=HF_DATASET,
+            repo_type="dataset",
+            path=hf_path
+        )
+        return len(list(files)) > 0
+    except Exception:
+        return False
+
+def get_hf_folder_progress(hf_path: str) -> dict:
+    """HF ফোল্ডার থেকে কোন PDF গুলো আপলোড হয়েছে তা বের করুন"""
+    try:
+        api = HfApi(token=HF_TOKEN)
+        files = api.list_files_info(
+            repo_id=HF_DATASET,
+            repo_type="dataset",
+            path=hf_path
+        )
+        
+        pdf_folders = set()
+        for file in files:
+            parts = file.rfilename.split('/')
+            if len(parts) >= 2:
+                # parts[0] = ফোল্ডার নাম, parts[1] = PDF নম্বর
+                folder_name = parts[1] if parts[0] == hf_path else parts[0]
+                if folder_name.isdigit():
+                    pdf_folders.add(folder_name)
+        
+        return {
+            "exists": True,
+            "uploaded_pdfs": sorted(list(pdf_folders)),
+            "total_uploaded": len(pdf_folders)
+        }
+    except Exception as e:
+        print(f"[HF Check] Error: {e}", flush=True)
+        return {"exists": False, "uploaded_pdfs": [], "total_uploaded": 0}
+
 # ============ PDF ডাউনলোড ============
 def download_pdf_stream(url):
     print(f"[DEBUG] Downloading: {url[:80]}...", flush=True)
@@ -145,8 +188,16 @@ def download_pdf_stream(url):
 
 # ============ বাল্ক ফোল্ডার আপলোড ============
 def upload_folder_to_hf(local_folder: str, hf_path: str):
-    """সম্পূর্ণ ফোল্ডার একসাথে HF-এ আপলোড করুন (একটি commit)"""
+    """সম্পূর্ণ ফোল্ডার একসাথে HF-এ আপলোড করুন"""
     try:
+        png_files = list(Path(local_folder).glob("*.png"))
+        file_count = len(png_files)
+        print(f"[INFO] Uploading {file_count} images to: {hf_path}", flush=True)
+        
+        if file_count == 0:
+            print(f"[ERROR] No PNG files found", flush=True)
+            return False
+        
         api = HfApi(token=HF_TOKEN)
         api.upload_folder(
             folder_path=local_folder,
@@ -154,10 +205,13 @@ def upload_folder_to_hf(local_folder: str, hf_path: str):
             repo_id=HF_DATASET,
             repo_type="dataset"
         )
-        print(f"[INFO] Uploaded folder to: {hf_path}", flush=True)
+        
+        print(f"[INFO] ✅ Uploaded {file_count} images", flush=True)
         return True
+        
     except Exception as e:
-        print(f"[ERROR] Folder upload failed: {e}", flush=True)
+        print(f"[ERROR] ❌ Upload failed: {e}", flush=True)
+        traceback.print_exc()
         return False
 
 async def is_task_cancelled(task_id):
@@ -169,17 +223,15 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
     full_hf_path = f"{clean_folder_name}/{sub_folder}"
     print(f"[INFO] Processing: {pdf['name']} -> {full_hf_path}", flush=True)
 
-    # চেকপয়েন্ট থেকে শেষ পৃষ্ঠা দেখুন
     start_page = 0
     if checkpoint.get('current') == pdf['name']:
         start_page = checkpoint.get('last_page', 0)
         if start_page > 0:
-            print(f"[INFO] Resuming {pdf['name']} from page {start_page + 1}", flush=True)
+            print(f"[INFO] Resuming from page {start_page + 1}", flush=True)
 
     if not pdf.get('download_link'):
         return 0, False
 
-    # ডাউনলোড
     print(f"[INFO] Downloading: {pdf['name']}", flush=True)
     try:
         pdf_path = download_pdf_stream(pdf['download_link'])
@@ -196,7 +248,6 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
         total_pages = len(doc)
         print(f"[INFO] {pdf['name']}: {total_pages} pages", flush=True)
         
-        # টাস্ক স্ট্যাটাস আপডেট
         async with running_tasks_lock:
             if task_id in running_tasks:
                 running_tasks[task_id]["current_pdf"] = pdf['name']
@@ -224,7 +275,6 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
 
             pages_processed += 1
 
-            # টাস্ক স্ট্যাটাস আপডেট
             async with running_tasks_lock:
                 if task_id in running_tasks:
                     running_tasks[task_id]["current_page"] = page_num + 1
@@ -235,16 +285,23 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
                 await async_save_checkpoint(folder_key, checkpoint)
                 print(f"[INFO] Progress: {page_num+1}/{total_pages} pages", flush=True)
 
-        # 🔥 PDF শেষে সম্পূর্ণ ফোল্ডার একসাথে আপলোড
         if pages_processed > 0:
             print(f"[INFO] Uploading {pages_processed} images to HF...", flush=True)
-            success = upload_folder_to_hf(str(temp_folder), full_hf_path)
-            if success:
+            
+            upload_success = False
+            for retry in range(3):
+                if upload_folder_to_hf(str(temp_folder), full_hf_path):
+                    upload_success = True
+                    break
+                print(f"[WARN] Upload retry {retry+1}/3", flush=True)
+                time.sleep(5)
+            
+            if upload_success:
                 checkpoint['current'] = None
                 checkpoint['last_page'] = total_pages
                 await async_save_checkpoint(folder_key, checkpoint)
             else:
-                raise Exception("HF upload failed")
+                raise Exception("HF upload failed after 3 retries")
 
         return pages_processed, False
         
@@ -260,18 +317,38 @@ async def process_single_pdf(pdf, clean_folder_name, folder_key, checkpoint, tas
         except:
             pass
 
-async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
+async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str, chat_id: int = 0):
     print(f"[DEBUG] ========== PROCESS STARTED ==========", flush=True)
     print(f"[DEBUG] Folder: {folder_name}", flush=True)
     print(f"[DEBUG] PDF Count: {len(pdf_urls)}", flush=True)
 
     try:
+        # 🔥 টাইমস্ট্যাম্প ছাড়া ক্লিন ফোল্ডার নাম
         clean_folder_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
-        print(f"[INFO] Starting: {clean_folder_name}", flush=True)
-
+        
+        # 🔥 HF-এ আগে থেকে ফোল্ডার আছে কিনা চেক করুন
+        print(f"[INFO] Checking HF for existing folder: {clean_folder_name}", flush=True)
+        hf_progress = get_hf_folder_progress(clean_folder_name)
+        
+        if hf_progress["exists"] and hf_progress["total_uploaded"] > 0:
+            print(f"[INFO] 📁 Folder already exists on HF", flush=True)
+            print(f"[INFO] Already uploaded PDFs: {hf_progress['uploaded_pdfs'][:10]}...", flush=True)
+        
+        # চেকপয়েন্ট লোড
         checkpoint = await load_checkpoint(f"direct_{clean_folder_name}")
-        already_processed = set(checkpoint.get('processed', []))
-        processed = []
+        local_processed = set(checkpoint.get('processed', []))
+        
+        # HF + লোকাল চেকপয়েন্ট কম্বাইন
+        hf_processed = set(hf_progress.get("uploaded_pdfs", []))
+        all_processed = local_processed.union(hf_processed)
+        print(f"[INFO] Total already processed: {len(all_processed)} PDFs", flush=True)
+        
+        processed = list(all_processed)
+        
+        # টাস্ক স্ট্যাটাস আপডেট
+        async with running_tasks_lock:
+            if task_id in running_tasks:
+                running_tasks[task_id]["completed_pdfs"] = len(processed)
 
         for idx, url in enumerate(pdf_urls):
             if shutdown_in_progress or await is_task_cancelled(task_id):
@@ -281,8 +358,14 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
             pdf_number = int(name_match.group(1)) if name_match else (idx + 1)
             pdf_name = f"{pdf_number}.pdf"
 
-            if pdf_name in already_processed:
-                print(f"[INFO] Skipping {pdf_name}", flush=True)
+            # 🔥 HF-এ আগে থেকেই থাকলে স্কিপ
+            if str(pdf_number) in hf_processed:
+                print(f"[INFO] ⏭️ Skipping {pdf_name} (already on HF)", flush=True)
+                continue
+            
+            # 🔥 লোকাল চেকপয়েন্টে থাকলে স্কিপ
+            if pdf_name in local_processed:
+                print(f"[INFO] ⏭️ Skipping {pdf_name} (already processed locally)", flush=True)
                 continue
 
             pdf = {'name': pdf_name, 'number': pdf_number, 'download_link': url}
@@ -298,19 +381,27 @@ async def process_pdf_urls(pdf_urls: list, folder_name: str, task_id: str):
                 processed.append(pdf_name)
                 checkpoint['processed'] = list(set(checkpoint.get('processed', []) + [pdf_name]))
                 await async_save_checkpoint(f"direct_{clean_folder_name}", checkpoint)
-                print(f"[INFO] Completed: {pdf_name} ({pages_processed} pages)", flush=True)
+                print(f"[INFO] ✅ Completed: {pdf_name} ({pages_processed} pages)", flush=True)
                 
                 async with running_tasks_lock:
                     if task_id in running_tasks:
                         running_tasks[task_id]["completed_pdfs"] = len(processed)
                         running_tasks[task_id]["current_pdf"] = None
                         running_tasks[task_id]["current_page"] = 0
+                
+                if idx < len(pdf_urls) - 1:
+                    await asyncio.sleep(PDF_SLEEP_BETWEEN)
+                    
             except Exception as e:
                 print(f"[ERROR] Failed: {pdf_name} - {e}", flush=True)
                 traceback.print_exc()
+                continue
 
-        if processed:
-            print(f"[INFO] All completed! {len(processed)} PDFs processed", flush=True)
+        new_processed = len(processed) - len(all_processed)
+        if new_processed > 0:
+            print(f"[INFO] 🎉 Completed {new_processed} new PDFs!", flush=True)
+        else:
+            print(f"[INFO] ✅ All PDFs were already processed!", flush=True)
 
         async with running_tasks_lock:
             if task_id in running_tasks:
@@ -429,6 +520,7 @@ HTML_TEMPLATE = """
                 <li>প্রথম লাইনে বইয়ের নাম লিখুন</li>
                 <li>তারপর Internet Archive আইটেম লিংক দিন</li>
                 <li>অথবা সরাসরি PDF লিংক দিন (প্রতি লাইনে একটি)</li>
+                <li>আগের ফোল্ডার থাকলে অটোমেটিক স্কিপ হবে</li>
             </ul>
         </div>
 
@@ -657,9 +749,20 @@ app = FastAPI(lifespan=lifespan)
 async def home():
     return HTMLResponse(content=HTML_TEMPLATE)
 
+@app.head("/")
+async def root_head():
+    return {"status": "ok"}
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.get("/check-folder/{folder_name}")
+async def check_folder(folder_name: str):
+    """HF-এ ফোল্ডার চেক করুন"""
+    clean_name = folder_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', '')
+    progress = get_hf_folder_progress(clean_name)
+    return progress
 
 @app.post("/process")
 async def process_form(request: Request):
@@ -706,7 +809,7 @@ async def process_form(request: Request):
         
         thread = threading.Thread(
             target=run_async_in_thread,
-            args=(process_pdf_urls, pdf_urls, book_name, task_id),
+            args=(process_pdf_urls, pdf_urls, book_name, task_id, 0),
             daemon=True
         )
         thread.start()
@@ -721,11 +824,6 @@ async def process_form(request: Request):
     except Exception as e:
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
-
-@app.head("/")
-async def root_head():
-    """HEAD রিকোয়েস্টের জন্য"""
-    return {"status": "ok"}
 
 @app.get("/tasks")
 async def get_tasks():
