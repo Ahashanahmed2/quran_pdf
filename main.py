@@ -40,7 +40,7 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 MIN_FREE_SPACE_MB = 500
 MAX_JOB_RUNTIME = 12 * 3600
 PDF_SLEEP_BETWEEN = 3
-BATCH_SIZE = 100  # প্রতি ব্যাচে ১০০ পৃষ্ঠা
+BATCH_SIZE = 20  # প্রতি ব্যাচে ১০০ পৃষ্ঠা
 # =====================================
 
 # গ্লোবাল ভেরিয়েবল
