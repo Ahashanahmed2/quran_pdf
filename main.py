@@ -69,10 +69,10 @@ HF_DATASET = os.environ.get("HF_DATASET")
 TEMP_DIR = Path("/tmp/tafsir_temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
-MIN_FREE_SPACE_MB = 150
+MIN_FREE_SPACE_MB = 40
 PDF_SLEEP_BETWEEN = 3
-PDF_BATCH_SIZE = 24
-MAX_FILES_PER_COMMIT = 25
+PDF_BATCH_SIZE = 30
+MAX_FILES_PER_COMMIT = 31
 MAX_CONCURRENT_TASKS = 2
 # =====================================
 
@@ -204,50 +204,50 @@ def download_pdf_with_retry(url, max_retries=3):
 # ============ স্ট্রিমিং আপলোড ফাংশন ============
 def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: str):
     max_retries = 5
-    
+
     for retry in range(max_retries):
         try:
             png_files = sorted(Path(local_folder).glob("*.png"))
             file_count = len(png_files)
-            
+
             if file_count == 0:
                 print(f"[ERROR] No PNG files found", flush=True)
                 return False
 
             print(f"[INFO] Uploading {file_count} images (attempt {retry+1}/{max_retries})", flush=True)
-            
+
             api = HfApi(token=HF_TOKEN)
-            
+
             for chunk_start in range(0, file_count, MAX_FILES_PER_COMMIT):
                 chunk_end = min(chunk_start + MAX_FILES_PER_COMMIT, file_count)
                 chunk_files = png_files[chunk_start:chunk_end]
-                
+
                 operations = []
                 for png_file in chunk_files:
                     remote_path = f"{hf_path}/{png_file.name}"
-                    
+
                     operations.append(
                         CommitOperationAdd(
                             path_in_repo=remote_path,
                             path_or_fileobj=str(png_file)
                         )
                     )
-                
+
                 chunk_num = chunk_start // MAX_FILES_PER_COMMIT + 1
                 total_chunks = (file_count + MAX_FILES_PER_COMMIT - 1) // MAX_FILES_PER_COMMIT
-                
+
                 print(f"[INFO] Commit {chunk_num}/{total_chunks}: {len(operations)} files", flush=True)
-                
+
                 api.create_commit(
                     repo_id=HF_DATASET,
                     repo_type="dataset",
                     operations=operations,
                     commit_message=f"📚 {batch_name} - part{chunk_num} ({len(operations)} pages)"
                 )
-            
+
             print(f"[INFO] ✅ Uploaded {file_count} images", flush=True)
             return True
-            
+
         except Exception as e:
             print(f"[ERROR] Upload attempt {retry+1} failed: {e}", flush=True)
             if retry < max_retries - 1:
@@ -257,7 +257,7 @@ def upload_folder_streaming_chunks(local_folder: str, hf_path: str, batch_name: 
             else:
                 traceback.print_exc()
                 return False
-    
+
     return False
 
 def is_task_cancelled(task_id):
@@ -346,10 +346,10 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
             free_mb = check_disk_space()
             batch_pages = min(PDF_BATCH_SIZE, total_pages - batch_start)
             estimated_needed = estimate_needed_space(batch_pages)
-            
+
             if free_mb < estimated_needed + 100:  # Add 100MB buffer
                 raise Exception(f"Low disk space: {free_mb}MB free, need ~{estimated_needed}MB for batch")
-            
+
             batch_end = min(batch_start + PDF_BATCH_SIZE, total_pages)
 
             # 🔥 FIX 9: Use mkdtemp for unique temp folder
@@ -370,8 +370,8 @@ def process_single_pdf_sync(pdf, clean_folder_name, task_id, pdf_index, total_pd
                             continue
 
                     page = batch_doc.load_page(page_num)
-                    #zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
-                    #mat = fitz.Matrix(zoom, zoom)
+                    zoom = 3.0  # 🔥 FIX 2: Reduced from 4.0 to 3.0
+                    mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(dpi=300, alpha=False)
 
                     img_name = f"page_{page_num+1:04d}.png"
@@ -749,34 +749,30 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                         html += `<div style="margin-top: 8px;">`;
                         html += `📁 <strong>${task.folder_name || 'Unknown'}</strong><br>`;
                         html += `🕐 শুরু: ${new Date(task.started_at * 1000).toLocaleString('bn-BD')}<br>`;
-                        // ✅ মেমরি বার - সবসময় দেখানোর জন্য
+                        
+                        // ✅ মেমরি বার - Render.com ফ্রি টায়ার লিমিট (৫২৫ MB)
                         const memUsage = task.memory_usage || 0;
-                        const sysMem = task.system_memory || { total: 525, percent: 0, available: 0 };
-                        const memPercent = sysMem.total > 0 ? Math.round((memUsage / sysMem.total) * 100) : 0;
-                
+                        const RENDER_LIMIT = 525;  // Render.com ফ্রি টায়ার লিমিট
+                        const memPercent = Math.round((memUsage / RENDER_LIMIT) * 100);
+                        const available = RENDER_LIMIT - memUsage;
+                        
                         let memColor = '#00d2ff';
                         let warningBadge = '';
                         if (memPercent > 85) {
-                             memColor = '#dc3545';
-                             warningBadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
+                            memColor = '#dc3545';
+                            warningBadge = '<span class="memory-critical">⚠️ ক্রিটিকাল</span>';
                         } else if (memPercent > 70) {
                             memColor = '#ff9800';
                             warningBadge = '<span class="memory-warning">⚠️ সতর্কতা</span>';
                         }
-                
+                        
                         html += `<div class="memory-info">`;
-                        html += `💾 মেমরি: ${memUsage} MB / ${sysMem.total} MB (${memPercent}%) ${warningBadge}<br>`;
+                        html += `💾 মেমরি: ${memUsage} MB / ${RENDER_LIMIT} MB (${memPercent}%) ${warningBadge}<br>`;
                         html += `<div class="memory-bar-container">
                             <div class="memory-bar" style="width: ${memPercent}%; background: ${memColor};"></div>
                         </div>`;
-                        if (sysMem.available > 0) {
-                            html += `<small>✅ উপলব্ধ: ${sysMem.available} MB</small>`;
-                        } else {
-                            html += `<small>📊 Render.com ফ্রি টায়ার (৫২৫ MB)</small>`;
-                        }
+                        html += `<small>✅ অবশিষ্ট: ${available} MB (Render.com ফ্রি লিমিট)</small>`;
                         html += `</div>`;
-                
-                        // বাকি কোড আগের মত...
                         
                         if (task.total_pdfs) {
                             const completed = task.completed_pdfs || 0;
@@ -789,10 +785,10 @@ https://archive.org/details/20260415_20260415_0945"></textarea>
                             </div>`;
                             
                             if (task.current_pdf) {
-                                // UI JavaScript-এ পরিবর্তন:
-                                const sysMem = task.system_memory || { total: 512, percent: 0, available: 0 };
-                                const displayTotal = 512;  // Render.com ফ্রি টায়ার লিমিট
-                                const memPercent = Math.round((memUsage / displayTotal) * 100);
+                                const currentPage = task.current_page || 0;
+                                const totalPages = task.current_pdf_total_pages || 0;
+                                const pagePercent = totalPages > 0 ? Math.round(currentPage * 100 / totalPages) : 0;
+                                
                                 html += `<div class="page-progress">`;
                                 html += `🔄 <strong>চলমান:</strong> ${task.current_pdf} (${task.current_pdf_index}/${task.total_pdfs})<br>`;
                                 html += `📄 <strong>পৃষ্ঠা:</strong> ${currentPage} / ${totalPages}<br>`;
@@ -974,7 +970,7 @@ async def process_form(request: Request):
             active_tasks = sum(1 for t in running_tasks.values() if t.get("status") == "running")
             if active_tasks >= MAX_CONCURRENT_TASKS:
                 return {"status": "error", "message": f"সার্ভার ব্যস্ত। সর্বোচ্চ {MAX_CONCURRENT_TASKS} টি টাস্ক চলতে পারে।"}
-        
+
         data = await request.json()
         book_name = data.get('book_name', f"tafsir_{int(time.time())}")
         urls = data.get('urls', [])
