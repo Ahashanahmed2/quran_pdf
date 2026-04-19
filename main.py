@@ -71,8 +71,8 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 MIN_FREE_SPACE_MB = 40
 PDF_SLEEP_BETWEEN = 3
-PDF_BATCH_SIZE = 50
-MAX_FILES_PER_COMMIT = 60
+PDF_BATCH_SIZE = 35
+MAX_FILES_PER_COMMIT = 40
 MAX_CONCURRENT_TASKS = 1
 # =====================================
 
