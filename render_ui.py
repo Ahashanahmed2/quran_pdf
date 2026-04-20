@@ -81,8 +81,7 @@ class ArchiveUpdateModel(BaseModel):
 class BulkArchiveInput(BaseModel):
     """Bulk archive input"""
     items: List[ArchiveItem]
-
-# ============ Config Manager ============
+# ============ Config Manager (Fixed) ============
 
 class ConfigManager:
     """Manage system configuration in MongoDB"""
@@ -90,56 +89,96 @@ class ConfigManager:
     def __init__(self):
         self.config_collection = None
         self.client = None
-        
+        self.db = None
+        self.is_connected = False
+    
     def initialize(self, mongodb_uri: str = None, db_name: str = "tafsir_config"):
         """Initialize MongoDB connection"""
-        if mongodb_uri:
-            try:
-                self.client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=5000)
-                self.client.admin.command('ping')
-                self.db = self.client[db_name]
-                self.config_collection = self.db["system_config"]
-                return True
-            except Exception as e:
-                print(f"MongoDB connection failed: {e}")
-                return False
-        return False
+        if not mongodb_uri:
+            print("[ConfigManager] No MongoDB URI provided")
+            return False
+        
+        try:
+            print(f"[ConfigManager] Connecting to MongoDB...")
+            self.client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=10000)
+            # Test connection
+            self.client.admin.command('ping')
+            
+            self.db = self.client[db_name]
+            self.config_collection = self.db["system_config"]
+            self.is_connected = True
+            
+            print(f"[ConfigManager] ✅ Connected to MongoDB: {db_name}")
+            return True
+            
+        except Exception as e:
+            print(f"[ConfigManager] ❌ MongoDB connection failed: {e}")
+            self.is_connected = False
+            return False
     
     def get_config(self) -> Dict:
         """Get current configuration"""
-        if self.config_collection:
-            config = self.config_collection.find_one({"_id": "current"})
-            if config:
-                config.pop("_id", None)
-                return config
+        # Try MongoDB first if connected
+        if self.is_connected and self.config_collection is not None:
+            try:
+                config = self.config_collection.find_one({"_id": "current"})
+                if config:
+                    config.pop("_id", None)
+                    config.pop("_id", None)  # Remove MongoDB ObjectId if present
+                    print("[ConfigManager] ✅ Loaded config from MongoDB")
+                    return config
+            except Exception as e:
+                print(f"[ConfigManager] Failed to load from MongoDB: {e}")
         
+        # Fallback to file
         if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    config = json.load(f)
+                    print("[ConfigManager] ✅ Loaded config from file")
+                    return config
+            except Exception as e:
+                print(f"[ConfigManager] Failed to load from file: {e}")
         
+        print("[ConfigManager] Using default config")
         return DEFAULT_CONFIG.copy()
     
     def save_config(self, config: Dict) -> bool:
         """Save configuration"""
-        config["updated_at"] = datetime.utcnow()
+        config["updated_at"] = datetime.utcnow().isoformat()
         
-        if self.config_collection:
+        # Try to save to MongoDB if connected
+        if self.is_connected and self.config_collection is not None:
             try:
-                self.config_collection.update_one(
+                result = self.config_collection.update_one(
                     {"_id": "current"},
                     {"$set": config},
                     upsert=True
                 )
-                return True
+                print(f"[ConfigManager] ✅ Saved to MongoDB. Modified: {result.modified_count}, Upserted: {result.upserted_id}")
+                
+                # Verify save
+                saved = self.config_collection.find_one({"_id": "current"})
+                if saved:
+                    print(f"[ConfigManager] ✅ Verified - Config exists in MongoDB")
+                    return True
+                    
             except Exception as e:
-                print(f"Failed to save to MongoDB: {e}")
+                print(f"[ConfigManager] ❌ Failed to save to MongoDB: {e}")
+        else:
+            print("[ConfigManager] ⚠️ Not connected to MongoDB, saving to file only")
         
+        # Fallback to file
         try:
+            # Ensure directory exists
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2, default=str)
+            print(f"[ConfigManager] ✅ Saved to file: {CONFIG_FILE}")
             return True
         except Exception as e:
-            print(f"Failed to save to file: {e}")
+            print(f"[ConfigManager] ❌ Failed to save to file: {e}")
             return False
     
     def test_mongodb_connection(self, uri: str) -> tuple:
@@ -148,6 +187,7 @@ class ConfigManager:
             client = MongoClient(uri, serverSelectionTimeoutMS=5000)
             client.admin.command('ping')
             server_info = client.server_info()
+            client.close()
             return True, f"Connected to MongoDB {server_info.get('version', 'Unknown')}"
         except Exception as e:
             return False, str(e)
@@ -889,10 +929,27 @@ async def get_config():
 
 @app.post("/api/config")
 async def save_config(config: SystemConfig):
-    success = config_manager.save_config(config.dict())
+    """Save configuration"""
+    print(f"[API] Saving configuration...")
+    
+    config_dict = config.dict()
+    
+    # Save using config manager
+    success = config_manager.save_config(config_dict)
+    
+    # Re-initialize MongoDB connection with new config
     if config.mongodb_uri:
-        config_manager.initialize(config.mongodb_uri, config.mongodb_db)
-    return {"success": success, "message": "Configuration saved"}
+        print(f"[API] Re-initializing MongoDB with new URI...")
+        init_success = config_manager.initialize(config.mongodb_uri, "tafsir_config")
+        
+        if init_success:
+            # Try to save again after connection
+            config_manager.save_config(config_dict)
+    
+    if success:
+        return {"success": True, "message": "Configuration saved successfully"}
+    else:
+        return {"success": False, "message": "Failed to save configuration"}
 
 @app.post("/api/test/mongodb")
 async def test_mongodb(request: Request):
@@ -974,11 +1031,21 @@ async def generate_workflow():
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup"""
+    print("[Startup] Initializing...")
+    
+    # Try to load config from file first
     if CONFIG_FILE.exists():
-        config = config_manager.get_config()
-        if config.get("mongodb_uri"):
-            config_manager.initialize(config["mongodb_uri"], config.get("mongodb_db", "tafsir_config"))
-
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            
+            if config.get("mongodb_uri"):
+                print(f"[Startup] Found saved config, connecting to MongoDB...")
+                config_manager.initialize(config["mongodb_uri"], "tafsir_config")
+        except Exception as e:
+            print(f"[Startup] Failed to load config: {e}")
+    
+    print("[Startup] ✅ Initialization complete")
 # ============ Main ============
 
 if __name__ == "__main__":
