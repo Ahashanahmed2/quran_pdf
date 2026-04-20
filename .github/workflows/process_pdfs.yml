@@ -57,16 +57,10 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-pip-
     
-    - name: Install system dependencies
+    - name: Install minimal dependencies for PyMuPDF
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          libgl1 \
-          libglib2.0-0 \
-          libglx-mesa0 \
-          libegl1-mesa \
-          libopengl0 \
-          libgomp1
+        sudo apt-get install -y libglib2.0-0 libgomp1
     
     - name: Install Python dependencies
       run: |
