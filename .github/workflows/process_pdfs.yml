@@ -2,22 +2,38 @@ name: Process Internet Archive PDFs (Optimized)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # প্রতি ৬ ঘন্টা পর পর (সংশোধন করা হয়েছে)
+    - cron: '0 0 * * 0'  # প্রতি ৬ ঘন্টা পর পর
   
   workflow_dispatch:
     inputs:
       max_pdfs:
-        description: 'সর্বোচ্চ PDF সংখ্যা'
+        description: 'সর্বোচ্চ PDF সংখ্যা (Default Fallback)'
         required: false
         default: '50'
-      parallel_pdfs:
-        description: 'প্যারালাল PDF প্রসেসিং'
-        required: false
-        default: '3'
       batch_size:
-        description: 'ব্যাচ সাইজ'
+        description: 'ব্যাচ সাইজ (Default Fallback)'
         required: false
-        default: '100'
+        default: '50'
+      max_files_per_commit:
+        description: 'প্রতি Commit-এ সর্বোচ্চ ফাইল (Default Fallback)'
+        required: false
+        default: '50'
+      image_zoom:
+        description: 'ইমেজ জুম (Default Fallback)'
+        required: false
+        default: '4.0'
+      image_dpi:
+        description: 'ইমেজ DPI (Default Fallback)'
+        required: false
+        default: '300'
+      max_workers:
+        description: 'ডাউনলোড ওয়ার্কার (Default Fallback)'
+        required: false
+        default: '2'
+      max_parallel_pdfs:
+        description: 'প্যারালাল PDF প্রসেসিং (Default Fallback)'
+        required: false
+        default: '2'
 
 jobs:
   process:
@@ -55,7 +71,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install PyMuPDF huggingface-hub pymongo dnspython psutil
     
     - name: Show system info
       run: |
@@ -76,10 +92,12 @@ jobs:
         MONGODB_DB: ${{ secrets.MONGODB_DB }}
         MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
         MAX_PDFS_PER_RUN: ${{ github.event.inputs.max_pdfs || '50' }}
-        PDF_BATCH_SIZE: ${{ github.event.inputs.batch_size || '100' }}
-        MAX_FILES_PER_COMMIT: '100'
-        MAX_PARALLEL_PDFS: ${{ github.event.inputs.parallel_pdfs || '3' }}
-        IMAGE_ZOOM: '4.0'
-        IMAGE_DPI: '300'
+        PDF_BATCH_SIZE: ${{ github.event.inputs.batch_size || '50' }}
+        MAX_FILES_PER_COMMIT: ${{ github.event.inputs.max_files_per_commit || '50' }}
+        IMAGE_ZOOM: ${{ github.event.inputs.image_zoom || '3.0' }}
+        IMAGE_DPI: ${{ github.event.inputs.image_dpi || '300' }}
+        MAX_WORKERS: ${{ github.event.inputs.max_workers || '2' }}
+        MAX_PARALLEL_PDFS: ${{ github.event.inputs.max_parallel_pdfs || '2' }}
         PDF_SLEEP_BETWEEN: '1'
-      run: python tafsir_processor_optimized.py
+        MAX_RETRIES: '3'
+      run: python main.py
