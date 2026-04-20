@@ -40,4 +40,4 @@ RUN mkdir -p /tmp/tafsir_temp
 EXPOSE 8000
 
 # Run the application
-CMD ["python", "render_web_ui.py"]
+CMD ["python", "render_ui.py"]
