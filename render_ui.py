@@ -96,7 +96,7 @@ class ConfigManager:
         if mongodb_uri:
             try:
                 self.client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=5000)
-                self.client.admin.command('ping')  # Test connection
+                self.client.admin.command('ping')
                 self.db = self.client[db_name]
                 self.config_collection = self.db["system_config"]
                 return True
@@ -113,7 +113,6 @@ class ConfigManager:
                 config.pop("_id", None)
                 return config
         
-        # Fallback to file or defaults
         if CONFIG_FILE.exists():
             with open(CONFIG_FILE, 'r') as f:
                 return json.load(f)
@@ -135,7 +134,6 @@ class ConfigManager:
             except Exception as e:
                 print(f"Failed to save to MongoDB: {e}")
         
-        # Fallback to file
         try:
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2, default=str)
@@ -149,8 +147,6 @@ class ConfigManager:
         try:
             client = MongoClient(uri, serverSelectionTimeoutMS=5000)
             client.admin.command('ping')
-            
-            # Get server info
             server_info = client.server_info()
             return True, f"Connected to MongoDB {server_info.get('version', 'Unknown')}"
         except Exception as e:
@@ -160,7 +156,6 @@ class ConfigManager:
         """Test HuggingFace connection"""
         try:
             api = HfApi(token=token)
-            # Try to get user info
             user = api.whoami()
             return True, f"Connected as {user.get('name', 'Unknown')}"
         except Exception as e:
@@ -175,22 +170,23 @@ class GitHubActionsGenerator:
     def generate_workflow(config: Dict) -> str:
         """Generate GitHub Actions workflow YAML"""
         
-        yaml_content = f"""name: Process Internet Archive PDFs
+        # Use .format() instead of f-string to avoid brace escaping issues
+        yaml_template = """name: Process Internet Archive PDFs
 
 on:
   schedule:
-    - cron: '{config.get("cron_schedule", "0 */6 * * *")}'
+    - cron: '{cron_schedule}'
   
   workflow_dispatch:
     inputs:
       max_pdfs:
         description: 'Maximum PDFs to process'
         required: false
-        default: '{config.get("max_pdfs_per_run", 50)}'
+        default: '{max_pdfs_per_run}'
       batch_size:
         description: 'PDF batch size'
         required: false
-        default: '{config.get("pdf_batch_size", 100)}'
+        default: '{pdf_batch_size}'
 
 jobs:
   process:
@@ -224,33 +220,44 @@ jobs:
     
     - name: Download processor script
       run: |
-        curl -o tafsir_processor.py https://raw.githubusercontent.com/{config.get("github_repo", "username/repo")}/main/tafsir_processor.py
+        curl -o tafsir_processor.py https://raw.githubusercontent.com/{github_repo}/main/tafsir_processor.py
     
     - name: Run processor
       env:
-        HF_TOKEN: ${{{{ secrets.HF_TOKEN }}}}}
-        HF_DATASET: ${{{{ secrets.HF_DATASET }}}}}
-        MONGODB_URI: ${{{{ secrets.MONGODB_URI }}}}}
-        MONGODB_DB: {config.get("mongodb_db", "tafsir_db")}
-        MONGODB_COLLECTION: {config.get("mongodb_collection", "archive_links")}
-        MAX_PDFS_PER_RUN: ${{{{ github.event.inputs.max_pdfs || '{config.get("max_pdfs_per_run", 50)}' }}}}
-        PDF_BATCH_SIZE: ${{{{ github.event.inputs.batch_size || '{config.get("pdf_batch_size", 100)}' }}}}
-        MAX_FILES_PER_COMMIT: '{config.get("max_files_per_commit", 100)}'
-        IMAGE_ZOOM: '{config.get("image_zoom", 4.0)}'
-        IMAGE_DPI: '{config.get("image_dpi", 300)}'
+        HF_TOKEN: ${{{{ secrets.HF_TOKEN }}}}
+        HF_DATASET: ${{{{ secrets.HF_DATASET }}}}
+        MONGODB_URI: ${{{{ secrets.MONGODB_URI }}}}
+        MONGODB_DB: {mongodb_db}
+        MONGODB_COLLECTION: {mongodb_collection}
+        MAX_PDFS_PER_RUN: ${{{{ github.event.inputs.max_pdfs || '{max_pdfs_per_run}' }}}}
+        PDF_BATCH_SIZE: ${{{{ github.event.inputs.batch_size || '{pdf_batch_size}' }}}}
+        MAX_FILES_PER_COMMIT: '{max_files_per_commit}'
+        IMAGE_ZOOM: '{image_zoom}'
+        IMAGE_DPI: '{image_dpi}'
         PDF_SLEEP_BETWEEN: '1'
       run: python tafsir_processor.py
 """
-        return yaml_content
+        
+        return yaml_template.format(
+            cron_schedule=config.get("cron_schedule", "0 */6 * * *"),
+            max_pdfs_per_run=config.get("max_pdfs_per_run", 50),
+            pdf_batch_size=config.get("pdf_batch_size", 100),
+            github_repo=config.get("github_repo", "username/repo"),
+            mongodb_db=config.get("mongodb_db", "tafsir_db"),
+            mongodb_collection=config.get("mongodb_collection", "archive_links"),
+            max_files_per_commit=config.get("max_files_per_commit", 100),
+            image_zoom=config.get("image_zoom", 4.0),
+            image_dpi=config.get("image_dpi", 300)
+        )
     
     @staticmethod
     def generate_secrets_instructions(config: Dict) -> str:
         """Generate secrets setup instructions"""
         
-        return f"""## GitHub Secrets Setup
+        template = """## GitHub Secrets Setup
 
 Add these secrets to your GitHub repository:
-`{config.get("github_repo", "username/repo")}`
+`{github_repo}`
 
 1. Go to: Settings → Secrets and variables → Actions
 2. Click "New repository secret"
@@ -258,22 +265,15 @@ Add these secrets to your GitHub repository:
 
 
 
-
 ```
 
-HF_TOKEN={config.get("hf_token", "your_hf_token_here")}
-HF_DATASET={config.get("hf_dataset", "username/dataset_name")}
-MONGODB_URI={config.get("mongodb_uri", "your_mongodb_uri")}
-MONGODB_DB={config.get("mongodb_db", "tafsir_db")}
-MONGODB_COLLECTION={config.get("mongodb_collection", "archive_links")}
+HF_TOKEN={hf_token}
+HF_DATASET={hf_dataset}
+MONGODB_URI={mongodb_uri}
+MONGODB_DB={mongodb_db}
+MONGODB_COLLECTION={mongodb_collection}
 
 ```
-
-
-
-
-
-
 
 
 
@@ -281,6 +281,15 @@ MONGODB_COLLECTION={config.get("mongodb_collection", "archive_links")}
 
 After adding secrets, go to Actions tab and run workflow manually to test.
 """
+        
+        return template.format(
+            github_repo=config.get("github_repo", "username/repo"),
+            hf_token=config.get("hf_token", "your_hf_token_here"),
+            hf_dataset=config.get("hf_dataset", "username/dataset_name"),
+            mongodb_uri=config.get("mongodb_uri", "your_mongodb_uri"),
+            mongodb_db=config.get("mongodb_db", "tafsir_db"),
+            mongodb_collection=config.get("mongodb_collection", "archive_links")
+        )
 
 # ============ FastAPI App ============
 
@@ -465,16 +474,6 @@ HTML_HEADER = """
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
-        .connection-status {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 5px;
-        }
-        .status-connected { background: #28a745; }
-        .status-disconnected { background: #dc3545; }
-        
         .code-block {
             background: #1e1e1e;
             color: #d4d4d4;
@@ -494,7 +493,6 @@ HTML_HEADER = """
 HTML_FOOTER = """
     </div>
     <script>
-        // Tab switching
         function showTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(tab => {
                 tab.classList.remove('active');
@@ -506,22 +504,17 @@ HTML_FOOTER = """
             event.target.classList.add('active');
         }
         
-        // Test MongoDB connection
         async function testMongoDB() {
             const uri = document.getElementById('mongodb_uri').value;
             const resultDiv = document.getElementById('mongodb-test-result');
-            
             resultDiv.innerHTML = 'Testing...';
-            
             try {
                 const response = await fetch('/api/test/mongodb', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({uri: uri})
                 });
-                
                 const data = await response.json();
-                
                 if (data.success) {
                     resultDiv.innerHTML = `<div class="alert alert-success">✅ ${data.message}</div>`;
                 } else {
@@ -532,22 +525,17 @@ HTML_FOOTER = """
             }
         }
         
-        // Test HF connection
         async function testHF() {
             const token = document.getElementById('hf_token').value;
             const resultDiv = document.getElementById('hf-test-result');
-            
             resultDiv.innerHTML = 'Testing...';
-            
             try {
                 const response = await fetch('/api/test/hf', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({token: token})
                 });
-                
                 const data = await response.json();
-                
                 if (data.success) {
                     resultDiv.innerHTML = `<div class="alert alert-success">✅ ${data.message}</div>`;
                 } else {
@@ -558,14 +546,11 @@ HTML_FOOTER = """
             }
         }
         
-        // Generate GitHub Actions workflow
         async function generateWorkflow() {
             const resultDiv = document.getElementById('workflow-result');
-            
             try {
                 const response = await fetch('/api/generate/workflow');
                 const data = await response.json();
-                
                 resultDiv.innerHTML = `
                     <h3>Generated Workflow File</h3>
                     <div class="code-block">${escapeHtml(data.workflow)}</div>
@@ -583,19 +568,15 @@ HTML_FOOTER = """
             return div.innerHTML;
         }
         
-        // Load archives
         async function loadArchives() {
             try {
                 const response = await fetch('/api/archives');
                 const archives = await response.json();
-                
                 const tbody = document.getElementById('archives-table-body');
-                
                 if (archives.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No archives found</td></tr>';
                     return;
                 }
-                
                 tbody.innerHTML = archives.map(item => `
                     <tr>
                         <td><input type="checkbox" value="${item._id}"></td>
@@ -615,26 +596,21 @@ HTML_FOOTER = """
             }
         }
         
-        // Add archive
         async function addArchive(event) {
             event.preventDefault();
-            
             const formData = {
                 book_name: document.getElementById('book_name').value,
                 archive_url: document.getElementById('archive_url').value,
                 priority: parseInt(document.getElementById('priority').value),
                 metadata: {}
             };
-            
             try {
                 const response = await fetch('/api/archives', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(formData)
                 });
-                
                 const data = await response.json();
-                
                 if (data.success) {
                     alert('Archive added successfully!');
                     document.getElementById('add-archive-form').reset();
@@ -647,13 +623,10 @@ HTML_FOOTER = """
             }
         }
         
-        // Save configuration
         async function saveConfig(event) {
             event.preventDefault();
-            
             const formData = {};
             const form = document.getElementById('config-form');
-            
             for (let element of form.elements) {
                 if (element.name) {
                     if (element.type === 'number') {
@@ -663,16 +636,13 @@ HTML_FOOTER = """
                     }
                 }
             }
-            
             try {
                 const response = await fetch('/api/config', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(formData)
                 });
-                
                 const data = await response.json();
-                
                 if (data.success) {
                     alert('Configuration saved successfully!');
                 } else {
@@ -683,10 +653,9 @@ HTML_FOOTER = """
             }
         }
         
-        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             loadArchives();
-            setInterval(loadArchives, 30000); // Refresh every 30 seconds
+            setInterval(loadArchives, 30000);
         });
     </script>
 </body>
@@ -699,10 +668,8 @@ HTML_FOOTER = """
 async def home(request: Request):
     """Main dashboard"""
     
-    # Get current config
     config = config_manager.get_config()
     
-    # Generate HTML content
     html_content = HTML_HEADER + f"""
         <div class="header">
             <h1>📚 তাফসীর PDF প্রসেসর কনফিগারেশন</h1>
@@ -714,7 +681,6 @@ async def home(request: Request):
             </div>
         </div>
         
-        <!-- Configuration Tab -->
         <div id="config-tab" class="tab-content active">
             <h2>সিস্টেম কনফিগারেশন</h2>
             <p style="color: #666; margin-bottom: 20px;">MongoDB, HuggingFace এবং প্রসেসিং সেটিংস কনফিগার করুন</p>
@@ -820,7 +786,6 @@ async def home(request: Request):
             </form>
         </div>
         
-        <!-- Archives Management Tab -->
         <div id="archives-tab" class="tab-content">
             <h2>Internet Archive Management</h2>
             <p style="color: #666; margin-bottom: 20px;">নতুন আর্কাইভ যোগ করুন বা বিদ্যমান আর্কাইভ ম্যানেজ করুন</p>
@@ -848,18 +813,6 @@ async def home(request: Request):
                 </form>
             </div>
             
-            <div style="background: #f8f9fa; padding: 20px; border-radius: 10px;">
-                <h3>📋 Bulk Import</h3>
-                <form id="bulk-import-form">
-                    <div class="form-group">
-                        <label for="bulk_data">Paste archive URLs (one per line)</label>
-                        <textarea id="bulk_data" rows="5" placeholder="Book Name 1|https://archive.org/details/...
-Book Name 2|https://archive.org/details/..."></textarea>
-                    </div>
-                    <button type="submit" class="btn btn-secondary">Import Bulk</button>
-                </form>
-            </div>
-            
             <div class="table-container">
                 <h3>📚 Existing Archives</h3>
                 <table>
@@ -879,15 +832,8 @@ Book Name 2|https://archive.org/details/..."></textarea>
                     </tbody>
                 </table>
             </div>
-            
-            <div class="btn-group">
-                <button class="btn btn-success" onclick="processSelected()">▶️ Process Selected</button>
-                <button class="btn btn-warning" onclick="resetSelected()">🔄 Reset Failed</button>
-                <button class="btn btn-danger" onclick="deleteSelected()">🗑️ Delete Selected</button>
-            </div>
         </div>
         
-        <!-- GitHub Actions Tab -->
         <div id="github-tab" class="tab-content">
             <h2>GitHub Actions Setup</h2>
             <p style="color: #666; margin-bottom: 20px;">GitHub Actions workflow ফাইল জেনারেট করুন</p>
@@ -905,7 +851,6 @@ Book Name 2|https://archive.org/details/..."></textarea>
             <div id="workflow-result"></div>
         </div>
         
-        <!-- Monitor Tab -->
         <div id="monitor-tab" class="tab-content">
             <h2>System Monitor</h2>
             <p style="color: #666; margin-bottom: 20px;">সিস্টেম স্ট্যাটাস এবং প্রসেসিং মনিটরিং</p>
@@ -926,13 +871,6 @@ Book Name 2|https://archive.org/details/..."></textarea>
                     <div id="active-tasks">0</div>
                 </div>
             </div>
-            
-            <div style="margin-top: 30px;">
-                <h3>Recent Processing Logs</h3>
-                <div id="logs-container" style="background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 8px; max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 12px;">
-                    Loading logs...
-                </div>
-            </div>
         </div>
     """ + HTML_FOOTER
     
@@ -940,93 +878,73 @@ Book Name 2|https://archive.org/details/..."></textarea>
 
 # ============ API Routes ============
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render"""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
 @app.get("/api/config")
 async def get_config():
-    """Get current configuration"""
     return config_manager.get_config()
 
 @app.post("/api/config")
 async def save_config(config: SystemConfig):
-    """Save configuration"""
     success = config_manager.save_config(config.dict())
-    
-    # Re-initialize MongoDB connection with new config
     if config.mongodb_uri:
         config_manager.initialize(config.mongodb_uri, config.mongodb_db)
-    
     return {"success": success, "message": "Configuration saved"}
 
 @app.post("/api/test/mongodb")
 async def test_mongodb(request: Request):
-    """Test MongoDB connection"""
     data = await request.json()
     uri = data.get("uri", "")
-    
     if not uri:
         return {"success": False, "message": "URI is required"}
-    
     success, message = config_manager.test_mongodb_connection(uri)
     return {"success": success, "message": message}
 
 @app.post("/api/test/hf")
 async def test_hf(request: Request):
-    """Test HuggingFace connection"""
     data = await request.json()
     token = data.get("token", "")
-    
     if not token:
         return {"success": False, "message": "Token is required"}
-    
     success, message = config_manager.test_hf_connection(token)
     return {"success": success, "message": message}
 
 @app.get("/api/archives")
 async def get_archives():
-    """Get all archive items"""
     config = config_manager.get_config()
-    
     if not config.get("mongodb_uri"):
         return []
-    
     try:
         client = MongoClient(config["mongodb_uri"])
         db = client[config.get("mongodb_db", "tafsir_db")]
         collection = db[config.get("mongodb_collection", "archive_links")]
-        
         archives = list(collection.find().sort("created_at", -1).limit(100))
-        
-        # Convert ObjectId to string
         for archive in archives:
             archive["_id"] = str(archive["_id"])
             if "created_at" in archive:
                 archive["created_at"] = archive["created_at"].isoformat()
             if "updated_at" in archive:
                 archive["updated_at"] = archive["updated_at"].isoformat()
-        
         client.close()
         return archives
-        
     except Exception as e:
         print(f"Failed to fetch archives: {e}")
         return []
 
 @app.post("/api/archives")
 async def add_archive(item: ArchiveItem):
-    """Add a new archive item"""
     config = config_manager.get_config()
-    
     if not config.get("mongodb_uri"):
         return {"success": False, "message": "MongoDB not configured"}
-    
     try:
         client = MongoClient(config["mongodb_uri"])
         db = client[config.get("mongodb_db", "tafsir_db")]
         collection = db[config.get("mongodb_collection", "archive_links")]
-        
-        # Generate ID from book name
         import re
         doc_id = re.sub(r'[^\w\-_]', '_', item.book_name.lower().replace(' ', '_'))
-        
         document = {
             "_id": doc_id,
             "book_name": item.book_name,
@@ -1038,85 +956,33 @@ async def add_archive(item: ArchiveItem):
             "updated_at": datetime.utcnow(),
             "metadata": item.metadata or {}
         }
-        
-        collection.update_one(
-            {"_id": doc_id},
-            {"$set": document},
-            upsert=True
-        )
-        
+        collection.update_one({"_id": doc_id}, {"$set": document}, upsert=True)
         client.close()
         return {"success": True, "message": "Archive added successfully", "id": doc_id}
-        
     except Exception as e:
         return {"success": False, "message": str(e)}
 
 @app.get("/api/generate/workflow")
 async def generate_workflow():
-    """Generate GitHub Actions workflow"""
     config = config_manager.get_config()
-    
     workflow = GitHubActionsGenerator.generate_workflow(config)
     instructions = GitHubActionsGenerator.generate_secrets_instructions(config)
-    
-    return {
-        "workflow": workflow,
-        "instructions": instructions
-    }
+    return {"workflow": workflow, "instructions": instructions}
 
-@app.get("/api/monitor/status")
-async def get_system_status():
-    """Get system status"""
-    config = config_manager.get_config()
-    
-    status = {
-        "mongodb": {"connected": False, "message": "Not configured"},
-        "hf": {"connected": False, "message": "Not configured"},
-        "active_tasks": 0
-    }
-    
-    # Check MongoDB
-    if config.get("mongodb_uri"):
-        success, message = config_manager.test_mongodb_connection(config["mongodb_uri"])
-        status["mongodb"] = {"connected": success, "message": message}
-        
-        if success:
-            # Count active tasks
-            try:
-                client = MongoClient(config["mongodb_uri"])
-                db = client[config.get("mongodb_db", "tafsir_db")]
-                collection = db[config.get("mongodb_collection", "archive_links")]
-                status["active_tasks"] = collection.count_documents({"status": "processing"})
-                client.close()
-            except:
-                pass
-    
-    # Check HuggingFace
-    if config.get("hf_token"):
-        success, message = config_manager.test_hf_connection(config["hf_token"])
-        status["hf"] = {"connected": success, "message": message}
-    
-    return status
-
-# ============ Main ============
+# ============ Startup Event ============
 
 @app.on_event("startup")
-
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Render"""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-
 async def startup_event():
     """Initialize on startup"""
-    # Try to load config from file first
     if CONFIG_FILE.exists():
         config = config_manager.get_config()
         if config.get("mongodb_uri"):
             config_manager.initialize(config["mongodb_uri"], config.get("mongodb_db", "tafsir_config"))
 
+# ============ Main ============
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
