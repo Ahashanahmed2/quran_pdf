@@ -259,6 +259,19 @@ Add these secrets to your GitHub repository:
 
 
 
+```
+
+HF_TOKEN={config.get("hf_token", "your_hf_token_here")}
+HF_DATASET={config.get("hf_dataset", "username/dataset_name")}
+MONGODB_URI={config.get("mongodb_uri", "your_mongodb_uri")}
+MONGODB_DB={config.get("mongodb_db", "tafsir_db")}
+MONGODB_COLLECTION={config.get("mongodb_collection", "archive_links")}
+
+```
+
+
+
+
 
 
 
