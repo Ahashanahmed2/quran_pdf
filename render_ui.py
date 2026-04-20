@@ -1101,6 +1101,14 @@ async def get_system_status():
 # ============ Main ============
 
 @app.on_event("startup")
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render"""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
 async def startup_event():
     """Initialize on startup"""
     # Try to load config from file first
