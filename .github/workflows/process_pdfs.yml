@@ -2,7 +2,7 @@ name: Process Internet Archive PDFs (Optimized)
 
 on:
   schedule:
-    - cron: '0 0 * * 0'  # প্রতি ৬ ঘন্টা পর পর
+    - cron: '0 0 * * 0'  # প্রতি সাপ্তাহে রবিবার রাত ১২ টা
   
   workflow_dispatch:
     inputs:
