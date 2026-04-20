@@ -1,62 +1,77 @@
-name: Process PDF
+name: Process Internet Archive PDFs (Optimized)
 
 on:
   schedule:
-    - cron: '30 10 * * *'
+    - cron: '* * * * 1'  # প্রতি ৬ ঘন্টা পর পর
+  
   workflow_dispatch:
+    inputs:
+      max_pdfs:
+        description: 'সর্বোচ্চ PDF সংখ্যা'
+        required: false
+        default: '50'
+      parallel_pdfs:
+        description: 'প্যারালাল PDF প্রসেসিং'
+        required: false
+        default: '3'
+      batch_size:
+        description: 'ব্যাচ সাইজ'
+        required: false
+        default: '100'
 
 jobs:
   process:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # ৬ ঘন্টা
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Download previous checkpoint
-        uses: actions/download-artifact@v4
-        with:
-          name: page-checkpoints
-          path: /tmp/checkpoints
-        continue-on-error: true
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-ben tesseract-ocr-ara tesseract-ocr-eng poppler-utils
-      
-      - name: Install Python dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-      
-      - name: Run PDF Processor
-        env:
-          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          IA_ACCOUNT_ID: ${{ secrets.IA_ACCOUNT_ID }}
-          IA_EMAIL: ${{ secrets.IA_EMAIL }}          # ✅ যোগ করুন
-          IA_PASSWORD: ${{ secrets.IA_PASSWORD }}    # ✅ যোগ করুন
-          IA_S3_ACCESS: ${{ secrets.IA_S3_ACCESS }}
-          IA_S3_SECRET: ${{ secrets.IA_S3_SECRET }}
-        run: 
-          python main.py
-      
-      - name: Upload checkpoint
-        uses: actions/upload-artifact@v4
-        with:
-          name: page-checkpoints
-          path: /tmp/checkpoints/
-          retention-days: 7
-      
-      - name: Upload tracking file
-        uses: actions/upload-artifact@v4
-        with:
-          name: tracking-data
-          path: /tmp/uploaded_files.Procles.j
-          retention-days: 7
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Show system info
+      run: |
+        echo "=== CPU Info ==="
+        lscpu | grep "Model name\|CPU(s)"
+        echo ""
+        echo "=== Memory Info ==="
+        free -h
+        echo ""
+        echo "=== Disk Info ==="
+        df -h /tmp
+    
+    - name: Run optimized processor
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_DATASET: ${{ secrets.HF_DATASET }}
+        MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        MONGODB_DB: ${{ secrets.MONGODB_DB }}
+        MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
+        MAX_PDFS_PER_RUN: ${{ github.event.inputs.max_pdfs || '50' }}
+        PDF_BATCH_SIZE: ${{ github.event.inputs.batch_size || '100' }}
+        MAX_FILES_PER_COMMIT: '100'
+        MAX_PARALLEL_PDFS: ${{ github.event.inputs.parallel_pdfs || '3' }}
+        IMAGE_ZOOM: '4.0'
+        IMAGE_DPI: '300'
+        PDF_SLEEP_BETWEEN: '1'
+      run: python tafsir_processor_optimized.py
