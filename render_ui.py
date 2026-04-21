@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "mongodb_collection": "archive_links",
     "pinecone_api_key": "",
     "pinecone_index_name": "tafsir-ocr",
-    "priority_default": ৫
+    "priority_default": 5
 }
 
 # Local config file for Render.com (fallback)
@@ -50,49 +50,49 @@ class SystemConfig(BaseModel):
     mongodb_collection: str = Field("archive_links", description="MongoDB Collection Name")
     pinecone_api_key: str = Field("", description="Pinecone API Key")
     pinecone_index_name: str = Field("tafsir-ocr", description="Pinecone Index Name")
-    priority_default: int = Field(৫, ge=১, le=১০, description="Default priority for new archives")
+    priority_default: int = Field(5, ge=1, le=10, description="Default priority for new archives")
 
 class ArchiveItem(BaseModel):
     """Archive item to process"""
     book_name: str = Field(..., description="Book name in Bengali/English")
     archive_url: str = Field(..., description="Internet Archive URL")
-    priority: int = Field(৫, ge=১, le=১০, description="Processing priority (১-১০)")
+    priority: int = Field(5, ge=1, le=10, description="Processing priority (1-10)")
     metadata: Optional[Dict] = Field(None, description="Additional metadata")
 
     # Processing settings for this specific archive
-    pdf_batch_size: int = Field(৫০, ge=১০, le=২০০)
-    max_files_per_commit: int = Field(৫০, ge=১০, le=১০০)
-    max_pdfs_per_run: int = Field(২০, ge=১, le=১০০)
-    image_zoom: float = Field(৩.০, ge=১.০, le=৫.০)
-    image_dpi: int = Field(২০০, ge=৭২, le=৪০০)
-    max_parallel_pdfs: int = Field(২, ge=১, le=৫)
-    max_workers: int = Field(২, ge=১, le=৫)
+    pdf_batch_size: int = Field(50, ge=10, le=200)
+    max_files_per_commit: int = Field(50, ge=10, le=100)
+    max_pdfs_per_run: int = Field(20, ge=1, le=100)
+    image_zoom: float = Field(3.0, ge=1.0, le=5.0)
+    image_dpi: int = Field(200, ge=72, le=400)
+    max_parallel_pdfs: int = Field(2, ge=1, le=5)
+    max_workers: int = Field(2, ge=1, le=5)
     
     # OCR Settings
-    ocr_oem: int = Field(৩, ge=০, le=৩)
-    ocr_psm: int = Field(৩, ge=০, le=১৩)
+    ocr_oem: int = Field(3, ge=0, le=3)
+    ocr_psm: int = Field(3, ge=0, le=13)
     ocr_lang: str = Field("ben", description="OCR Languages (e.g., ben+ara+eng)")
-    ocr_workers: int = Field(২, ge=১, le=৪)
+    ocr_workers: int = Field(2, ge=1, le=4)
 
 class ArchiveUpdateModel(BaseModel):
     """Update archive item"""
     book_name: Optional[str] = None
     archive_url: Optional[str] = None
-    priority: Optional[int] = Field(None, ge=১, le=১০)
+    priority: Optional[int] = Field(None, ge=1, le=10)
     status: Optional[str] = None
     metadata: Optional[Dict] = None
-    pdf_batch_size: Optional[int] = Field(None, ge=১০, le=২০০)
-    max_files_per_commit: Optional[int] = Field(None, ge=১০, le=১০০)
-    max_pdfs_per_run: Optional[int] = Field(None, ge=১, le=১০০)
-    image_zoom: Optional[float] = Field(None, ge=১.০, le=৫.০)
-    image_dpi: Optional[int] = Field(None, ge=৭২, le=৪০০)
-    max_parallel_pdfs: Optional[int] = Field(None, ge=১, le=৫)
-    max_workers: Optional[int] = Field(None, ge=১, le=৫)
-    ocr_oem: Optional[int] = Field(None, ge=০, le=৩)
-    ocr_psm: Optional[int] = Field(None, ge=০, le=১৩)
+    pdf_batch_size: Optional[int] = Field(None, ge=10, le=200)
+    max_files_per_commit: Optional[int] = Field(None, ge=10, le=100)
+    max_pdfs_per_run: Optional[int] = Field(None, ge=1, le=100)
+    image_zoom: Optional[float] = Field(None, ge=1.0, le=5.0)
+    image_dpi: Optional[int] = Field(None, ge=72, le=400)
+    max_parallel_pdfs: Optional[int] = Field(None, ge=1, le=5)
+    max_workers: Optional[int] = Field(None, ge=1, le=5)
+    ocr_oem: Optional[int] = Field(None, ge=0, le=3)
+    ocr_psm: Optional[int] = Field(None, ge=0, le=13)
     ocr_lang: Optional[str] = None
-    ocr_workers: Optional[int] = Field(None, ge=১, le=৪)
-    retry_count: Optional[int] = Field(None, ge=০, le=১০)
+    ocr_workers: Optional[int] = Field(None, ge=1, le=4)
+    retry_count: Optional[int] = Field(None, ge=0, le=10)
 
 class BulkArchiveInput(BaseModel):
     """Bulk archive input"""
@@ -118,24 +118,24 @@ class ConfigManager:
 
         try:
             print(f"[ConfigManager] Connecting to MongoDB...")
-            self.client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=১০০০০)
+            self.client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=10000)
             self.client.admin.command('ping')
 
             self.db = self.client[db_name]
             self.config_collection = self.db["system_config"]
 
-            # Archive collection-ও initialize করুন
+            # Archive collection initialize
             data_db_name = DEFAULT_CONFIG.get("mongodb_db", "tafsir_db")
             data_collection_name = DEFAULT_CONFIG.get("mongodb_collection", "archive_links")
             data_db = self.client[data_db_name]
             self.archive_collection = data_db[data_collection_name]
 
             self.is_connected = True
-            print(f"[ConfigManager] ✅ Connected to MongoDB: {db_name}")
+            print(f"[ConfigManager] Connected to MongoDB: {db_name}")
             return True
 
         except Exception as e:
-            print(f"[ConfigManager] ❌ MongoDB connection failed: {e}")
+            print(f"[ConfigManager] MongoDB connection failed: {e}")
             self.is_connected = False
             return False
 
@@ -146,7 +146,7 @@ class ConfigManager:
                 config = self.config_collection.find_one({"_id": "current"})
                 if config:
                     config.pop("_id", None)
-                    print("[ConfigManager] ✅ Loaded config from MongoDB")
+                    print("[ConfigManager] Loaded config from MongoDB")
                     return config
             except Exception as e:
                 print(f"[ConfigManager] Failed to load from MongoDB: {e}")
@@ -155,7 +155,7 @@ class ConfigManager:
             try:
                 with open(CONFIG_FILE, 'r') as f:
                     config = json.load(f)
-                    print("[ConfigManager] ✅ Loaded config from file")
+                    print("[ConfigManager] Loaded config from file")
                     return config
             except Exception as e:
                 print(f"[ConfigManager] Failed to load from file: {e}")
@@ -174,43 +174,42 @@ class ConfigManager:
                     {"$set": config},
                     upsert=True
                 )
-                print(f"[ConfigManager] ✅ Saved to MongoDB. Modified: {result.modified_count}, Upserted: {result.upserted_id}")
+                print(f"[ConfigManager] Saved to MongoDB. Modified: {result.modified_count}, Upserted: {result.upserted_id}")
 
                 saved = self.config_collection.find_one({"_id": "current"})
                 if saved:
-                    print(f"[ConfigManager] ✅ Verified - Config exists in MongoDB")
+                    print(f"[ConfigManager] Verified - Config exists in MongoDB")
 
-                    # MongoDB URI সেভ হলে archive collection রি-ইনিশিয়ালাইজ
                     if config.get("mongodb_uri") and config.get("mongodb_db") and config.get("mongodb_collection"):
                         try:
                             data_db = self.client[config["mongodb_db"]]
                             self.archive_collection = data_db[config["mongodb_collection"]]
-                            print(f"[ConfigManager] ✅ Archive collection initialized: {config['mongodb_db']}.{config['mongodb_collection']}")
+                            print(f"[ConfigManager] Archive collection initialized: {config['mongodb_db']}.{config['mongodb_collection']}")
                         except Exception as e:
-                            print(f"[ConfigManager] ⚠️ Failed to initialize archive collection: {e}")
+                            print(f"[ConfigManager] Failed to initialize archive collection: {e}")
 
                     return True
 
             except Exception as e:
-                print(f"[ConfigManager] ❌ Failed to save to MongoDB: {e}")
+                print(f"[ConfigManager] Failed to save to MongoDB: {e}")
         else:
-            print("[ConfigManager] ⚠️ Not connected to MongoDB, saving to file only")
+            print("[ConfigManager] Not connected to MongoDB, saving to file only")
 
         try:
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
             with open(CONFIG_FILE, 'w') as f:
-                json.dump(config, f, indent=২, default=str)
-            print(f"[ConfigManager] ✅ Saved to file: {CONFIG_FILE}")
+                json.dump(config, f, indent=2, default=str)
+            print(f"[ConfigManager] Saved to file: {CONFIG_FILE}")
             return True
         except Exception as e:
-            print(f"[ConfigManager] ❌ Failed to save to file: {e}")
+            print(f"[ConfigManager] Failed to save to file: {e}")
             return False
 
     def test_mongodb_connection(self, uri: str) -> tuple:
         """Test MongoDB connection"""
         try:
-            client = MongoClient(uri, serverSelectionTimeoutMS=৫০০০)
+            client = MongoClient(uri, serverSelectionTimeoutMS=5000)
             client.admin.command('ping')
             server_info = client.server_info()
             client.close()
@@ -227,14 +226,14 @@ class ConfigManager:
         except Exception as e:
             return False, str(e)
 
-    def get_archives(self, limit: int = ১০০) -> List[Dict]:
+    def get_archives(self, limit: int = 100) -> List[Dict]:
         """Get all archive items"""
         if not self.is_connected or self.archive_collection is None:
-            print("[ConfigManager] ⚠️ Not connected to archive collection")
+            print("[ConfigManager] Not connected to archive collection")
             return []
 
         try:
-            archives = list(self.archive_collection.find().sort("created_at", -১).limit(limit))
+            archives = list(self.archive_collection.find().sort("created_at", -1).limit(limit))
             for archive in archives:
                 archive["_id"] = str(archive["_id"])
                 if "created_at" in archive:
@@ -319,7 +318,7 @@ class ConfigManager:
 
         try:
             result = self.archive_collection.delete_one({"_id": archive_id})
-            if result.deleted_count > ০:
+            if result.deleted_count > 0:
                 return True, "Archive deleted successfully"
             else:
                 return False, "Archive not found"
@@ -330,10 +329,10 @@ class ConfigManager:
         """Get processing statistics"""
         if not self.is_connected or self.archive_collection is None:
             return {
-                "active_tasks": ০,
-                "total_completed": ০,
-                "total_pending": ০,
-                "total_failed": ০
+                "active_tasks": 0,
+                "total_completed": 0,
+                "total_pending": 0,
+                "total_failed": 0
             }
 
         try:
@@ -346,10 +345,10 @@ class ConfigManager:
         except Exception as e:
             print(f"[ConfigManager] Failed to get statistics: {e}")
             return {
-                "active_tasks": ০,
-                "total_completed": ০,
-                "total_pending": ০,
-                "total_failed": ০
+                "active_tasks": 0,
+                "total_completed": 0,
+                "total_pending": 0,
+                "total_failed": 0
             }
 
     def close(self):
@@ -364,7 +363,7 @@ class ConfigManager:
 
 # ============ FastAPI App ============
 
-app = FastAPI(title="তাফসীর PDF প্রসেসর কনফিগ", version="৩.০.০")
+app = FastAPI(title="Tafsir PDF Processor Config", version="3.0.0")
 
 # Initialize config manager
 config_manager = ConfigManager()
@@ -376,60 +375,60 @@ HTML_HEADER = """
 <html lang="bn">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=১.০, maximum-scale=১.০, user-scalable=yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>তাফসীর PDF প্রসেসর - কনফিগারেশন</title>
     <style>
-        * { margin: ০; padding: ০; box-sizing: border-box; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(১৩৫deg, #১a৫f৭a ০%, #০d৩b৪c ১০০%);
-            min-height: ১০০vh;
-            padding: ২০px;
+            background: linear-gradient(135deg, #1a5f7a 0%, #0d3b4c 100%);
+            min-height: 100vh;
+            padding: 20px;
         }
         .container {
-            max-width: ১৬০০px;
-            margin: ০ auto;
+            max-width: 1600px;
+            margin: 0 auto;
         }
         .header {
             background: white;
-            border-radius: ১৫px;
-            padding: ২০px ৩০px;
-            margin-bottom: ২০px;
-            box-shadow: ০ ৫px ১৫px rgba(০,০,০,০.১);
+            border-radius: 15px;
+            padding: 20px 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
         .header h1 {
-            color: #১a৫f৭a;
-            font-size: ২৪px;
+            color: #1a5f7a;
+            font-size: 24px;
         }
         .nav-tabs {
             display: flex;
-            gap: ১০px;
+            gap: 10px;
         }
         .nav-tab {
-            padding: ১২px ২৪px;
-            background: #f০f০f০;
+            padding: 12px 24px;
+            background: #f0f0f0;
             border: none;
-            border-radius: ৮px;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: ১৫px;
-            font-weight: ৫০০;
-            transition: all ০.৩s;
+            font-size: 15px;
+            font-weight: 500;
+            transition: all 0.3s;
         }
         .nav-tab:hover {
-            background: #e০e০e০;
+            background: #e0e0e0;
         }
         .nav-tab.active {
-            background: #১a৫f৭a;
+            background: #1a5f7a;
             color: white;
         }
         .tab-content {
             background: white;
-            border-radius: ১৫px;
-            padding: ৩০px;
-            box-shadow: ০ ৫px ১৫px rgba(০,০,০,০.১);
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
             display: none;
         }
         .tab-content.active {
@@ -437,35 +436,35 @@ HTML_HEADER = """
         }
         .form-grid {
             display: grid;
-            grid-template-columns: repeat(২, ১fr);
-            gap: ২৫px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 25px;
         }
         .form-group {
-            margin-bottom: ২০px;
+            margin-bottom: 20px;
         }
         .form-group.full-width {
-            grid-column: span ২;
+            grid-column: span 2;
         }
         label {
             display: block;
-            margin-bottom: ৮px;
-            font-weight: ৬০০;
-            color: #৩৩৩;
-            font-size: ১৬px;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+            font-size: 16px;
         }
         input, select, textarea {
-            width: ১০০%;
-            padding: ১৪px ১৮px;
-            border: ২px solid #e০e০e০;
-            border-radius: ১০px;
-            font-size: ১৬px;
-            transition: border-color ০.৩s, box-shadow ০.৩s;
+            width: 100%;
+            padding: 14px 18px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s, box-shadow 0.3s;
             background: white;
         }
         input:focus, select:focus, textarea:focus {
             outline: none;
-            border-color: #১a৫f৭a;
-            box-shadow: ০ ০ ০ ৪px rgba(২৬, ৯৫, ১২২, ০.১);
+            border-color: #1a5f7a;
+            box-shadow: 0 0 0 4px rgba(26, 95, 122, 0.1);
         }
         input[type="number"] {
             -moz-appearance: textfield;
@@ -473,247 +472,247 @@ HTML_HEADER = """
         input[type="number"]::-webkit-outer-spin-button,
         input[type="number"]::-webkit-inner-spin-button {
             -webkit-appearance: none;
-            margin: ০;
+            margin: 0;
         }
         .btn {
-            padding: ১৪px ২৮px;
+            padding: 14px 28px;
             border: none;
-            border-radius: ১০px;
-            font-size: ১৬px;
-            font-weight: ৬০০;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
             cursor: pointer;
-            transition: all ০.৩s;
+            transition: all 0.3s;
             white-space: nowrap;
         }
         .btn-primary {
-            background: linear-gradient(১৩৫deg, #১a৫f৭a ০%, #০d৩b৪c ১০০%);
+            background: linear-gradient(135deg, #1a5f7a 0%, #0d3b4c 100%);
             color: white;
         }
         .btn-primary:hover {
-            transform: translateY(-২px);
-            box-shadow: ০ ৫px ১৫px rgba(২৬, ৯৫, ১২২, ০.৪);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(26, 95, 122, 0.4);
         }
         .btn-secondary {
-            background: #৬c৭৫৭d;
+            background: #6c757d;
             color: white;
         }
         .btn-secondary:hover {
-            background: #৫a৬২৬৮;
+            background: #5a6268;
         }
         .btn-success {
-            background: #২৮a৭৪৫;
+            background: #28a745;
             color: white;
         }
         .btn-danger {
-            background: #dc৩৫৪৫;
+            background: #dc3545;
             color: white;
         }
         .btn-warning {
-            background: #ffc১০৭;
-            color: #৩৩৩;
+            background: #ffc107;
+            color: #333;
         }
         .btn-group {
             display: flex;
-            gap: ১৫px;
-            margin-top: ২৫px;
+            gap: 15px;
+            margin-top: 25px;
             flex-wrap: wrap;
         }
         .status-badge {
             display: inline-block;
-            padding: ৬px ১৪px;
-            border-radius: ২০px;
-            font-size: ১৩px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
             font-weight: bold;
         }
-        .status-pending { background: #fff৩cd; color: #৮৫৬৪০৪; }
-        .status-processing { background: #cce৫ff; color: #০০৪০৮৫; }
-        .status-completed { background: #d৪edda; color: #১৫৫৭২৪; }
-        .status-failed { background: #f৮d৭da; color: #৭২১c২৪; }
+        .status-pending { background: #fff3cd; color: #856404; }
+        .status-processing { background: #cce5ff; color: #004085; }
+        .status-completed { background: #d4edda; color: #155724; }
+        .status-failed { background: #f8d7da; color: #721c24; }
         
         .table-container {
             overflow-x: auto;
-            margin-top: ৩০px;
-            border-radius: ১২px;
-            border: ১px solid #e০e০e০;
+            margin-top: 30px;
+            border-radius: 12px;
+            border: 1px solid #e0e0e0;
         }
         table {
-            width: ১০০%;
+            width: 100%;
             border-collapse: collapse;
-            font-size: ১৪px;
+            font-size: 14px;
         }
         th, td {
-            padding: ১৪px ১৬px;
+            padding: 14px 16px;
             text-align: left;
-            border-bottom: ১px solid #e০e০e০;
+            border-bottom: 1px solid #e0e0e0;
         }
         th {
-            background: #f৮f৯fa;
-            font-weight: ৬০০;
-            color: #৩৩৩;
-            font-size: ১৪px;
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
         }
         td {
-            color: #৫৫৫;
+            color: #555;
         }
         tr:hover {
-            background: #f৮f৯fa;
+            background: #f8f9fa;
         }
         .alert {
-            padding: ১৮px ২০px;
-            border-radius: ১০px;
-            margin-bottom: ২০px;
-            font-size: ১৫px;
+            padding: 18px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-size: 15px;
         }
         .alert-success {
-            background: #d৪edda;
-            color: #১৫৫৭২৪;
-            border: ১px solid #c৩e৬cb;
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
         }
         .alert-error {
-            background: #f৮d৭da;
-            color: #৭২১c২৪;
-            border: ১px solid #f৫c৬cb;
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
         }
         h2 {
-            font-size: ২৪px;
-            margin-bottom: ১৫px;
-            color: #৩৩৩;
+            font-size: 24px;
+            margin-bottom: 15px;
+            color: #333;
         }
         h3 {
-            font-size: ১৮px;
-            margin-bottom: ১৫px;
-            color: #৪৪৪;
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #444;
         }
         h4 {
-            font-size: ১৬px;
-            margin: ২০px ০ ১৫px ০;
-            color: #৫৫৫;
-            border-bottom: ২px solid #e০e০e০;
-            padding-bottom: ১০px;
+            font-size: 16px;
+            margin: 20px 0 15px 0;
+            color: #555;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
         }
         .card {
-            background: #f৮f৯fa;
-            padding: ২৫px;
-            border-radius: ১৫px;
-            margin-bottom: ৩০px;
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 30px;
         }
         small {
             display: block;
-            margin-top: ৫px;
-            color: #৬৬৬;
-            font-size: ১৩px;
+            margin-top: 5px;
+            color: #666;
+            font-size: 13px;
         }
         .settings-section {
             background: white;
-            padding: ২০px;
-            border-radius: ১০px;
-            margin-top: ২০px;
-            border: ১px solid #e০e০e০;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            border: 1px solid #e0e0e0;
         }
         .edit-form-container {
             position: fixed;
-            top: ০;
-            left: ০;
-            right: ০;
-            bottom: ০;
-            background: rgba(০,০,০,০.৫);
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
             display: none;
             justify-content: center;
             align-items: center;
-            z-index: ১০০০;
+            z-index: 1000;
         }
         .edit-form {
             background: white;
-            padding: ৩০px;
-            border-radius: ১৫px;
-            max-width: ৯০০px;
-            max-height: ৯০vh;
+            padding: 30px;
+            border-radius: 15px;
+            max-width: 900px;
+            max-height: 90vh;
             overflow-y: auto;
-            width: ৯০%;
+            width: 90%;
         }
         
         .mobile-archive-card {
-            background: #f৮f৯fa;
-            padding: ১৫px;
-            border-radius: ১০px;
-            margin-bottom: ১৫px;
-            border-left: ৪px solid #১a৫f৭a;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            border-left: 4px solid #1a5f7a;
         }
         
-        @media screen and (max-width: ৭৬৮px) {
+        @media screen and (max-width: 768px) {
             body {
-                padding: ১০px;
+                padding: 10px;
             }
             
             .header {
                 flex-direction: column;
-                gap: ১৫px;
-                padding: ১৫px ২০px;
+                gap: 15px;
+                padding: 15px 20px;
             }
             
             .header h1 {
-                font-size: ২০px;
+                font-size: 20px;
                 text-align: center;
             }
             
             .nav-tabs {
                 flex-wrap: wrap;
                 justify-content: center;
-                width: ১০০%;
+                width: 100%;
             }
             
             .nav-tab {
-                padding: ১০px ১৬px;
-                font-size: ১৪px;
-                flex: ১ ০ auto;
+                padding: 10px 16px;
+                font-size: 14px;
+                flex: 1 0 auto;
             }
             
             .tab-content {
-                padding: ২০px ১৫px;
+                padding: 20px 15px;
             }
             
             .form-grid {
-                grid-template-columns: ১fr !important;
-                gap: ১৫px;
+                grid-template-columns: 1fr !important;
+                gap: 15px;
             }
             
             .form-group.full-width {
-                grid-column: span ১;
+                grid-column: span 1;
             }
             
             #add-archive-form > div:first-of-type {
-                grid-template-columns: ১fr !important;
-                gap: ১৫px;
+                grid-template-columns: 1fr !important;
+                gap: 15px;
             }
             
             .settings-section > div {
-                grid-template-columns: ১fr !important;
-                gap: ১৫px;
+                grid-template-columns: 1fr !important;
+                gap: 15px;
             }
             
             .btn {
-                padding: ১২px ১৬px;
-                font-size: ১৪px;
-                width: ১০০%;
+                padding: 12px 16px;
+                font-size: 14px;
+                width: 100%;
             }
             
             .btn-group {
                 flex-direction: column;
-                gap: ১০px;
+                gap: 10px;
             }
             
             .card {
-                padding: ১৫px;
+                padding: 15px;
             }
             
             .edit-form {
-                padding: ২০px;
-                width: ৯৫%;
+                padding: 20px;
+                width: 95%;
             }
             
             #monitor-tab > div:first-of-type {
-                grid-template-columns: ১fr !important;
-                gap: ১৫px;
+                grid-template-columns: 1fr !important;
+                gap: 15px;
             }
         }
     </style>
@@ -733,23 +732,23 @@ HTML_FOOTER = """
                 <input type="hidden" id="edit_archive_id">
                 
                 <h4>📋 সাধারণ তথ্য</h4>
-                <div style="display: grid; gap: ১৫px;">
+                <div style="display: grid; gap: 15px;">
                     <div>
                         <label for="edit_book_name">📚 বইয়ের নাম *</label>
-                        <input type="text" id="edit_book_name" required style="padding: ১৪px;">
+                        <input type="text" id="edit_book_name" required style="padding: 14px;">
                     </div>
                     <div>
                         <label for="edit_archive_url">🔗 আর্কাইভ URL *</label>
-                        <input type="text" id="edit_archive_url" required style="padding: ১৪px;">
+                        <input type="text" id="edit_archive_url" required style="padding: 14px;">
                     </div>
-                    <div style="display: grid; grid-template-columns: ১fr ১fr; gap: ১৫px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
                         <div>
-                            <label for="edit_priority">⚡ অগ্রাধিকার (১-১০)</label>
-                            <input type="number" id="edit_priority" min="১" max="১০" style="padding: ১৪px;">
+                            <label for="edit_priority">⚡ অগ্রাধিকার (1-10)</label>
+                            <input type="number" id="edit_priority" min="1" max="10" style="padding: 14px;">
                         </div>
                         <div>
                             <label for="edit_status">📊 অবস্থা</label>
-                            <select id="edit_status" style="padding: ১৪px;">
+                            <select id="edit_status" style="padding: 14px;">
                                 <option value="pending">অপেক্ষমান</option>
                                 <option value="processing">প্রক্রিয়াধীন</option>
                                 <option value="completed">সম্পন্ন</option>
@@ -761,42 +760,42 @@ HTML_FOOTER = """
                 </div>
                 
                 <h4>⚙️ প্রসেসিং সেটিংস</h4>
-                <div style="display: grid; grid-template-columns: repeat(২, ১fr); gap: ১৫px;">
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
                     <div>
                         <label for="edit_pdf_batch_size">📦 PDF ব্যাচ সাইজ</label>
-                        <input type="number" id="edit_pdf_batch_size" min="১০" max="২০০" style="padding: ১২px;">
+                        <input type="number" id="edit_pdf_batch_size" min="10" max="200" style="padding: 12px;">
                     </div>
                     <div>
                         <label for="edit_max_files_per_commit">📤 প্রতি কমিটে সর্বোচ্চ ফাইল</label>
-                        <input type="number" id="edit_max_files_per_commit" min="১০" max="১০০" style="padding: ১২px;">
+                        <input type="number" id="edit_max_files_per_commit" min="10" max="100" style="padding: 12px;">
                     </div>
                     <div>
                         <label for="edit_max_pdfs_per_run">📚 প্রতি রানে সর্বোচ্চ PDF</label>
-                        <input type="number" id="edit_max_pdfs_per_run" min="১" max="১০০" style="padding: ১২px;">
+                        <input type="number" id="edit_max_pdfs_per_run" min="1" max="100" style="padding: 12px;">
                     </div>
                     <div>
                         <label for="edit_image_zoom">🔍 ইমেজ জুম</label>
-                        <input type="number" id="edit_image_zoom" min="১.০" max="৫.০" step="০.৫" style="padding: ১২px;">
+                        <input type="number" id="edit_image_zoom" min="1.0" max="5.0" step="0.5" style="padding: 12px;">
                     </div>
                     <div>
                         <label for="edit_image_dpi">🖼️ ইমেজ DPI</label>
-                        <input type="number" id="edit_image_dpi" min="৭২" max="৪০০" style="padding: ১২px;">
+                        <input type="number" id="edit_image_dpi" min="72" max="400" style="padding: 12px;">
                     </div>
                     <div>
                         <label for="edit_max_parallel_pdfs">⚡ প্যারালাল PDF</label>
-                        <input type="number" id="edit_max_parallel_pdfs" min="১" max="৫" style="padding: ১২px;">
+                        <input type="number" id="edit_max_parallel_pdfs" min="1" max="5" style="padding: 12px;">
                     </div>
                     <div>
                         <label for="edit_max_workers">🔄 ডাউনলোড ওয়ার্কার</label>
-                        <input type="number" id="edit_max_workers" min="১" max="৫" style="padding: ১২px;">
+                        <input type="number" id="edit_max_workers" min="1" max="5" style="padding: 12px;">
                     </div>
                 </div>
                 
                 <h4>🔤 OCR সেটিংস</h4>
-                <div style="display: grid; grid-template-columns: repeat(৩, ১fr); gap: ১৫px;">
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
                     <div>
-                        <label for="edit_ocr_lang_১">ভাষা ১ (প্রাথমিক)</label>
-                        <select id="edit_ocr_lang_১" style="padding: ১২px;">
+                        <label for="edit_ocr_lang_1">ভাষা 1 (প্রাথমিক)</label>
+                        <select id="edit_ocr_lang_1" style="padding: 12px;">
                             <option value="ben" selected>🇧🇩 বাংলা</option>
                             <option value="ara">🇸🇦 আরবি</option>
                             <option value="eng">🇬🇧 ইংরেজি</option>
@@ -806,8 +805,8 @@ HTML_FOOTER = """
                         </select>
                     </div>
                     <div>
-                        <label for="edit_ocr_lang_২">ভাষা ২ (ঐচ্ছিক)</label>
-                        <select id="edit_ocr_lang_২" style="padding: ১২px;">
+                        <label for="edit_ocr_lang_2">ভাষা 2 (ঐচ্ছিক)</label>
+                        <select id="edit_ocr_lang_2" style="padding: 12px;">
                             <option value="" selected>-- কোনোটি নয় --</option>
                             <option value="ben">🇧🇩 বাংলা</option>
                             <option value="ara">🇸🇦 আরবি</option>
@@ -818,8 +817,8 @@ HTML_FOOTER = """
                         </select>
                     </div>
                     <div>
-                        <label for="edit_ocr_lang_৩">ভাষা ৩ (ঐচ্ছিক)</label>
-                        <select id="edit_ocr_lang_৩" style="padding: ১২px;">
+                        <label for="edit_ocr_lang_3">ভাষা 3 (ঐচ্ছিক)</label>
+                        <select id="edit_ocr_lang_3" style="padding: 12px;">
                             <option value="" selected>-- কোনোটি নয় --</option>
                             <option value="ben">🇧🇩 বাংলা</option>
                             <option value="ara">🇸🇦 আরবি</option>
@@ -830,38 +829,38 @@ HTML_FOOTER = """
                         </select>
                     </div>
                 </div>
-                <div style="display: grid; grid-template-columns: repeat(৩, ১fr); gap: ১৫px; margin-top: ১৫px;">
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 15px;">
                     <div>
                         <label for="edit_ocr_oem">OCR ইঞ্জিন মোড</label>
-                        <select id="edit_ocr_oem" style="padding: ১২px;">
-                            <option value="৩" selected>৩ - LSTM নিউরাল (সেরা)</option>
-                            <option value="১">১ - শুধু LSTM</option>
-                            <option value="২">২ - LSTM + লিগ্যাসি</option>
-                            <option value="০">০ - শুধু লিগ্যাসি</option>
+                        <select id="edit_ocr_oem" style="padding: 12px;">
+                            <option value="3" selected>3 - LSTM নিউরাল (সেরা)</option>
+                            <option value="1">1 - শুধু LSTM</option>
+                            <option value="2">2 - LSTM + লিগ্যাসি</option>
+                            <option value="0">0 - শুধু লিগ্যাসি</option>
                         </select>
                     </div>
                     <div>
                         <label for="edit_ocr_psm">পৃষ্ঠা সেগমেন্টেশন</label>
-                        <select id="edit_ocr_psm" style="padding: ১২px;">
-                            <option value="৩" selected>৩ - স্বয়ংক্রিয়</option>
-                            <option value="৬">৬ - সমান টেক্সট ব্লক</option>
-                            <option value="১">১ - OSD সহ স্বয়ংক্রিয়</option>
-                            <option value="৪">৪ - একক কলাম</option>
-                            <option value="৭">৭ - একক টেক্সট লাইন</option>
-                            <option value="৮">৮ - একক শব্দ</option>
-                            <option value="১১">১১ - বিক্ষিপ্ত টেক্সট</option>
-                            <option value="১২">১২ - OSD সহ বিক্ষিপ্ত</option>
-                            <option value="১৩">১৩ - র' লাইন</option>
+                        <select id="edit_ocr_psm" style="padding: 12px;">
+                            <option value="3" selected>3 - স্বয়ংক্রিয়</option>
+                            <option value="6">6 - সমান টেক্সট ব্লক</option>
+                            <option value="1">1 - OSD সহ স্বয়ংক্রিয়</option>
+                            <option value="4">4 - একক কলাম</option>
+                            <option value="7">7 - একক টেক্সট লাইন</option>
+                            <option value="8">8 - একক শব্দ</option>
+                            <option value="11">11 - বিক্ষিপ্ত টেক্সট</option>
+                            <option value="12">12 - OSD সহ বিক্ষিপ্ত</option>
+                            <option value="13">13 - র' লাইন</option>
                         </select>
                     </div>
                     <div>
                         <label for="edit_ocr_workers">OCR ওয়ার্কার</label>
-                        <input type="number" id="edit_ocr_workers" min="১" max="৪" value="২" style="padding: ১২px;">
+                        <input type="number" id="edit_ocr_workers" min="1" max="4" value="2" style="padding: 12px;">
                         <small>প্যারালাল OCR থ্রেড</small>
                     </div>
                 </div>
                 
-                <div class="btn-group" style="margin-top: ২৫px;">
+                <div class="btn-group" style="margin-top: 25px;">
                     <button type="submit" class="btn btn-primary">💾 আপডেট করুন</button>
                     <button type="button" class="btn btn-secondary" onclick="closeEditModal()">❌ বাতিল</button>
                 </div>
@@ -871,7 +870,7 @@ HTML_FOOTER = """
     
     <script>
         function isMobile() {
-            return window.innerWidth <= ৭৬৮;
+            return window.innerWidth <= 768;
         }
         
         function showTab(tabId) {
@@ -892,7 +891,7 @@ HTML_FOOTER = """
         async function testMongoDB() {
             const uri = document.getElementById('mongodb_uri').value;
             const resultDiv = document.getElementById('mongodb-test-result');
-            resultDiv.innerHTML = 'পরীক্ষা করা হচ্ছে...';
+            resultDiv.innerHTML = 'Testing...';
             try {
                 const response = await fetch('/api/test/mongodb', {
                     method: 'POST',
@@ -906,28 +905,7 @@ HTML_FOOTER = """
                     resultDiv.innerHTML = `<div class="alert alert-error">❌ ${data.message}</div>`;
                 }
             } catch (e) {
-                resultDiv.innerHTML = `<div class="alert alert-error">❌ সংযোগ ব্যর্থ</div>`;
-            }
-        }
-        
-        async function testHF() {
-            const token = document.getElementById('hf_token').value;
-            const resultDiv = document.getElementById('hf-test-result');
-            resultDiv.innerHTML = 'পরীক্ষা করা হচ্ছে...';
-            try {
-                const response = await fetch('/api/test/hf', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({token: token})
-                });
-                const data = await response.json();
-                if (data.success) {
-                    resultDiv.innerHTML = `<div class="alert alert-success">✅ ${data.message}</div>`;
-                } else {
-                    resultDiv.innerHTML = `<div class="alert alert-error">❌ ${data.message}</div>`;
-                }
-            } catch (e) {
-                resultDiv.innerHTML = `<div class="alert alert-error">❌ সংযোগ ব্যর্থ</div>`;
+                resultDiv.innerHTML = `<div class="alert alert-error">❌ Connection failed</div>`;
             }
         }
         
@@ -940,21 +918,21 @@ HTML_FOOTER = """
         function formatMobileCard(archive) {
             return `
                 <div class="mobile-archive-card">
-                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: ১০px;">
-                        <strong style="font-size: ১৬px;">${archive.book_name || 'N/A'}</strong>
-                        <span class="status-badge status-${archive.status || 'pending'}">${archive.status || 'অপেক্ষমান'}</span>
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
+                        <strong style="font-size: 16px;">${archive.book_name || 'N/A'}</strong>
+                        <span class="status-badge status-${archive.status || 'pending'}">${archive.status || 'pending'}</span>
                     </div>
-                    <div style="font-size: ১২px; color: #৬৬৬; margin-bottom: ৮px; word-break: break-all;">
-                        ${archive.url ? archive.url.substring(০, ৫০) + '...' : 'N/A'}
+                    <div style="font-size: 12px; color: #666; margin-bottom: 8px; word-break: break-all;">
+                        ${archive.url ? archive.url.substring(0, 50) + '...' : 'N/A'}
                     </div>
-                    <div style="display: grid; grid-template-columns: repeat(৩, ১fr); gap: ৮px; font-size: ১২px; margin-bottom: ১০px;">
-                        <div><span style="color: #৬৬৬;">অগ্রাধিকার:</span> ${archive.priority || ৫}</div>
-                        <div><span style="color: #৬৬৬;">ব্যাচ:</span> ${archive.processing_settings?.pdf_batch_size || ৫০}</div>
-                        <div><span style="color: #৬৬৬;">অগ্রগতি:</span> ${archive.completed_pdfs || ০}/${archive.total_pdfs || ০}</div>
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 12px; margin-bottom: 10px;">
+                        <div><span style="color: #666;">Priority:</span> ${archive.priority || 5}</div>
+                        <div><span style="color: #666;">Batch:</span> ${archive.processing_settings?.pdf_batch_size || 50}</div>
+                        <div><span style="color: #666;">Progress:</span> ${archive.completed_pdfs || 0}/${archive.total_pdfs || 0}</div>
                     </div>
-                    <div style="display: flex; gap: ৮px; justify-content: flex-end;">
-                        <button class="btn btn-secondary" onclick="editArchive('${archive._id}')" style="padding: ৮px ১৬px; font-size: ১২px;">✏️ সম্পাদনা</button>
-                        <button class="btn btn-danger" onclick="deleteArchive('${archive._id}')" style="padding: ৮px ১৬px; font-size: ১২px;">🗑️ মুছুন</button>
+                    <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                        <button class="btn btn-secondary" onclick="editArchive('${archive._id}')" style="padding: 8px 16px; font-size: 12px;">✏️ Edit</button>
+                        <button class="btn btn-danger" onclick="deleteArchive('${archive._id}')" style="padding: 8px 16px; font-size: 12px;">🗑️ Delete</button>
                     </div>
                 </div>
             `;
@@ -963,17 +941,17 @@ HTML_FOOTER = """
         function formatTableRow(archive) {
             return `
                 <tr>
-                    <td><input type="checkbox" value="${archive._id}" style="width: ১৮px; height: ১৮px;"></td>
+                    <td><input type="checkbox" value="${archive._id}" style="width: 18px; height: 18px;"></td>
                     <td><strong>${archive.book_name || 'N/A'}</strong></td>
-                    <td>${archive.url ? archive.url.substring(০, ৪০) + '...' : 'N/A'}</td>
-                    <td><span class="status-badge status-${archive.status || 'pending'}">${archive.status || 'অপেক্ষমান'}</span></td>
-                    <td>${archive.priority || ৫}</td>
-                    <td>${archive.processing_settings?.pdf_batch_size || ৫০}</td>
-                    <td>${archive.completed_pdfs || ০}/${archive.total_pdfs || ০}</td>
+                    <td>${archive.url ? archive.url.substring(0, 40) + '...' : 'N/A'}</td>
+                    <td><span class="status-badge status-${archive.status || 'pending'}">${archive.status || 'pending'}</span></td>
+                    <td>${archive.priority || 5}</td>
+                    <td>${archive.processing_settings?.pdf_batch_size || 50}</td>
+                    <td>${archive.completed_pdfs || 0}/${archive.total_pdfs || 0}</td>
                     <td>${archive.updated_at ? new Date(archive.updated_at).toLocaleString('bn-BD') : 'N/A'}</td>
                     <td>
-                        <button class="btn btn-secondary" onclick="editArchive('${archive._id}')" style="padding: ৬px ১২px; font-size: ১২px;">✏️</button>
-                        <button class="btn btn-danger" onclick="deleteArchive('${archive._id}')" style="padding: ৬px ১২px; font-size: ১২px;">🗑️</button>
+                        <button class="btn btn-secondary" onclick="editArchive('${archive._id}')" style="padding: 6px 12px; font-size: 12px;">✏️</button>
+                        <button class="btn btn-danger" onclick="deleteArchive('${archive._id}')" style="padding: 6px 12px; font-size: 12px;">🗑️</button>
                     </td>
                 </tr>
             `;
@@ -988,8 +966,8 @@ HTML_FOOTER = """
                     const container = document.getElementById('mobile-archives-container');
                     const tableContainer = document.querySelector('.table-container');
                     
-                    if (archives.length === ০) {
-                        container.innerHTML = '<p style="text-align: center; padding: ৪০px; color: #৬৬৬;">কোনো আর্কাইভ পাওয়া যায়নি। নিচে প্রথম আর্কাইভ যোগ করুন।</p>';
+                    if (archives.length === 0) {
+                        container.innerHTML = '<p style="text-align: center; padding: 40px; color: #666;">No archives found. Add your first archive below.</p>';
                     } else {
                         container.innerHTML = archives.map(formatMobileCard).join('');
                     }
@@ -1000,8 +978,8 @@ HTML_FOOTER = """
                     const tbody = document.getElementById('archives-table-body');
                     const mobileContainer = document.getElementById('mobile-archives-container');
                     
-                    if (archives.length === ০) {
-                        tbody.innerHTML = '<tr><td colspan="৯" style="text-align: center; padding: ৪০px;">কোনো আর্কাইভ পাওয়া যায়নি। নিচে প্রথম আর্কাইভ যোগ করুন।</td></tr>';
+                    if (archives.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 40px;">No archives found. Add your first archive below.</td></tr>';
                     } else {
                         tbody.innerHTML = archives.map(formatTableRow).join('');
                     }
@@ -1021,33 +999,32 @@ HTML_FOOTER = """
         async function addArchive(event) {
             event.preventDefault();
             
-            // Collect OCR languages
             const ocrLanguages = [];
-            const lang১ = document.getElementById('ocr_lang_১').value;
-            const lang২ = document.getElementById('ocr_lang_২').value;
-            const lang৩ = document.getElementById('ocr_lang_৩').value;
+            const lang1 = document.getElementById('ocr_lang_1').value;
+            const lang2 = document.getElementById('ocr_lang_2').value;
+            const lang3 = document.getElementById('ocr_lang_3').value;
             
-            if (lang১) ocrLanguages.push(lang১);
-            if (lang২) ocrLanguages.push(lang২);
-            if (lang৩) ocrLanguages.push(lang৩);
+            if (lang1) ocrLanguages.push(lang1);
+            if (lang2) ocrLanguages.push(lang2);
+            if (lang3) ocrLanguages.push(lang3);
             
             const ocrLangString = ocrLanguages.join('+') || 'ben';
             
             const formData = {
                 book_name: document.getElementById('book_name').value,
                 archive_url: document.getElementById('archive_url').value,
-                priority: parseInt(document.getElementById('priority').value) || ৫,
-                pdf_batch_size: parseInt(document.getElementById('pdf_batch_size').value) || ৫০,
-                max_files_per_commit: parseInt(document.getElementById('max_files_per_commit').value) || ৫০,
-                max_pdfs_per_run: parseInt(document.getElementById('max_pdfs_per_run').value) || ২০,
-                image_zoom: parseFloat(document.getElementById('image_zoom').value) || ৩.০,
-                image_dpi: parseInt(document.getElementById('image_dpi').value) || ২০০,
-                max_parallel_pdfs: parseInt(document.getElementById('max_parallel_pdfs').value) || ২,
-                max_workers: parseInt(document.getElementById('max_workers').value) || ২,
-                ocr_oem: parseInt(document.getElementById('ocr_oem').value) || ৩,
-                ocr_psm: parseInt(document.getElementById('ocr_psm').value) || ৩,
+                priority: parseInt(document.getElementById('priority').value) || 5,
+                pdf_batch_size: parseInt(document.getElementById('pdf_batch_size').value) || 50,
+                max_files_per_commit: parseInt(document.getElementById('max_files_per_commit').value) || 50,
+                max_pdfs_per_run: parseInt(document.getElementById('max_pdfs_per_run').value) || 20,
+                image_zoom: parseFloat(document.getElementById('image_zoom').value) || 3.0,
+                image_dpi: parseInt(document.getElementById('image_dpi').value) || 200,
+                max_parallel_pdfs: parseInt(document.getElementById('max_parallel_pdfs').value) || 2,
+                max_workers: parseInt(document.getElementById('max_workers').value) || 2,
+                ocr_oem: parseInt(document.getElementById('ocr_oem').value) || 3,
+                ocr_psm: parseInt(document.getElementById('ocr_psm').value) || 3,
                 ocr_lang: ocrLangString,
-                ocr_workers: parseInt(document.getElementById('ocr_workers').value) || ২,
+                ocr_workers: parseInt(document.getElementById('ocr_workers').value) || 2,
                 metadata: {}
             };
             
@@ -1061,28 +1038,28 @@ HTML_FOOTER = """
                 const data = await response.json();
                 
                 if (data.success) {
-                    alert('✅ ' + data.message);
+                    alert('Archive added successfully!');
                     document.getElementById('add-archive-form').reset();
-                    document.getElementById('priority').value = '৫';
-                    document.getElementById('pdf_batch_size').value = '৫০';
-                    document.getElementById('max_files_per_commit').value = '৫০';
-                    document.getElementById('max_pdfs_per_run').value = '২০';
-                    document.getElementById('image_zoom').value = '৩.০';
-                    document.getElementById('image_dpi').value = '২০০';
-                    document.getElementById('max_parallel_pdfs').value = '২';
-                    document.getElementById('max_workers').value = '২';
-                    document.getElementById('ocr_oem').value = '৩';
-                    document.getElementById('ocr_psm').value = '৩';
-                    document.getElementById('ocr_lang_১').value = 'ben';
-                    document.getElementById('ocr_lang_২').value = '';
-                    document.getElementById('ocr_lang_৩').value = '';
-                    document.getElementById('ocr_workers').value = '২';
+                    document.getElementById('priority').value = '5';
+                    document.getElementById('pdf_batch_size').value = '50';
+                    document.getElementById('max_files_per_commit').value = '50';
+                    document.getElementById('max_pdfs_per_run').value = '20';
+                    document.getElementById('image_zoom').value = '3.0';
+                    document.getElementById('image_dpi').value = '200';
+                    document.getElementById('max_parallel_pdfs').value = '2';
+                    document.getElementById('max_workers').value = '2';
+                    document.getElementById('ocr_oem').value = '3';
+                    document.getElementById('ocr_psm').value = '3';
+                    document.getElementById('ocr_lang_1').value = 'ben';
+                    document.getElementById('ocr_lang_2').value = '';
+                    document.getElementById('ocr_lang_3').value = '';
+                    document.getElementById('ocr_workers').value = '2';
                     loadArchives();
                 } else {
-                    alert('❌ ' + data.message);
+                    alert('Failed to add archive: ' + data.message);
                 }
             } catch (e) {
-                alert('❌ আর্কাইভ যোগ করতে ব্যর্থ');
+                alert('Failed to add archive');
             }
         }
         
@@ -1095,7 +1072,7 @@ HTML_FOOTER = """
             for (let element of form.elements) {
                 if (element.name) {
                     if (element.type === 'number') {
-                        formData[element.name] = parseFloat(element.value) || ০;
+                        formData[element.name] = parseFloat(element.value) || 0;
                     } else {
                         formData[element.name] = element.value;
                     }
@@ -1112,13 +1089,13 @@ HTML_FOOTER = """
                 const data = await response.json();
                 
                 if (data.success) {
-                    alert('✅ কনফিগারেশন সফলভাবে সংরক্ষিত!');
-                    setTimeout(() => location.reload(), ৫০০);
+                    alert('Configuration saved successfully!');
+                    setTimeout(() => location.reload(), 500);
                 } else {
-                    alert('❌ কনফিগারেশন সংরক্ষণ ব্যর্থ: ' + data.message);
+                    alert('Failed to save configuration: ' + data.message);
                 }
             } catch (e) {
-                alert('❌ কনফিগারেশন সংরক্ষণ ব্যর্থ');
+                alert('Failed to save configuration');
             }
         }
         
@@ -1132,33 +1109,32 @@ HTML_FOOTER = """
                     document.getElementById('edit_archive_id').value = id;
                     document.getElementById('edit_book_name').value = archive.book_name || '';
                     document.getElementById('edit_archive_url').value = archive.url || '';
-                    document.getElementById('edit_priority').value = archive.priority || ৫;
+                    document.getElementById('edit_priority').value = archive.priority || 5;
                     document.getElementById('edit_status').value = archive.status || 'pending';
                     
                     const settings = archive.processing_settings || {};
-                    document.getElementById('edit_pdf_batch_size').value = settings.pdf_batch_size || ৫০;
-                    document.getElementById('edit_max_files_per_commit').value = settings.max_files_per_commit || ৫০;
-                    document.getElementById('edit_max_pdfs_per_run').value = settings.max_pdfs_per_run || ২০;
-                    document.getElementById('edit_image_zoom').value = settings.image_zoom || ৩.০;
-                    document.getElementById('edit_image_dpi').value = settings.image_dpi || ২০০;
-                    document.getElementById('edit_max_parallel_pdfs').value = settings.max_parallel_pdfs || ২;
-                    document.getElementById('edit_max_workers').value = settings.max_workers || ২;
-                    document.getElementById('edit_ocr_oem').value = settings.ocr_oem || ৩;
-                    document.getElementById('edit_ocr_psm').value = settings.ocr_psm || ৩;
-                    document.getElementById('edit_ocr_workers').value = settings.ocr_workers || ২;
+                    document.getElementById('edit_pdf_batch_size').value = settings.pdf_batch_size || 50;
+                    document.getElementById('edit_max_files_per_commit').value = settings.max_files_per_commit || 50;
+                    document.getElementById('edit_max_pdfs_per_run').value = settings.max_pdfs_per_run || 20;
+                    document.getElementById('edit_image_zoom').value = settings.image_zoom || 3.0;
+                    document.getElementById('edit_image_dpi').value = settings.image_dpi || 200;
+                    document.getElementById('edit_max_parallel_pdfs').value = settings.max_parallel_pdfs || 2;
+                    document.getElementById('edit_max_workers').value = settings.max_workers || 2;
+                    document.getElementById('edit_ocr_oem').value = settings.ocr_oem || 3;
+                    document.getElementById('edit_ocr_psm').value = settings.ocr_psm || 3;
+                    document.getElementById('edit_ocr_workers').value = settings.ocr_workers || 2;
                     
-                    // Parse OCR languages
                     const ocrLang = settings.ocr_lang || 'ben';
                     const languages = ocrLang.split('+');
                     
-                    document.getElementById('edit_ocr_lang_১').value = languages[০] || 'ben';
-                    document.getElementById('edit_ocr_lang_২').value = languages[১] || '';
-                    document.getElementById('edit_ocr_lang_৩').value = languages[২] || '';
+                    document.getElementById('edit_ocr_lang_1').value = languages[0] || 'ben';
+                    document.getElementById('edit_ocr_lang_2').value = languages[1] || '';
+                    document.getElementById('edit_ocr_lang_3').value = languages[2] || '';
                     
                     document.getElementById('edit-modal').style.display = 'flex';
                 }
             } catch (e) {
-                alert('আর্কাইভ বিবরণ লোড করতে ব্যর্থ');
+                alert('Failed to load archive details');
             }
         }
         
@@ -1171,15 +1147,14 @@ HTML_FOOTER = """
             
             const id = document.getElementById('edit_archive_id').value;
             
-            // Collect OCR languages
             const ocrLanguages = [];
-            const lang১ = document.getElementById('edit_ocr_lang_১').value;
-            const lang২ = document.getElementById('edit_ocr_lang_২').value;
-            const lang৩ = document.getElementById('edit_ocr_lang_৩').value;
+            const lang1 = document.getElementById('edit_ocr_lang_1').value;
+            const lang2 = document.getElementById('edit_ocr_lang_2').value;
+            const lang3 = document.getElementById('edit_ocr_lang_3').value;
             
-            if (lang১) ocrLanguages.push(lang১);
-            if (lang২) ocrLanguages.push(lang২);
-            if (lang৩) ocrLanguages.push(lang৩);
+            if (lang1) ocrLanguages.push(lang1);
+            if (lang2) ocrLanguages.push(lang2);
+            if (lang3) ocrLanguages.push(lang3);
             
             const ocrLangString = ocrLanguages.join('+') || 'ben';
             
@@ -1211,19 +1186,19 @@ HTML_FOOTER = """
                 const data = await response.json();
                 
                 if (data.success) {
-                    alert('✅ ' + data.message);
+                    alert('Archive updated successfully!');
                     closeEditModal();
                     loadArchives();
                 } else {
-                    alert('❌ ' + data.message);
+                    alert('Failed to update archive: ' + data.message);
                 }
             } catch (e) {
-                alert('❌ আর্কাইভ আপডেট করতে ব্যর্থ');
+                alert('Failed to update archive');
             }
         }
         
         async function deleteArchive(id) {
-            if (!confirm('আপনি কি নিশ্চিত এই আর্কাইভটি মুছে ফেলতে চান?')) return;
+            if (!confirm('Are you sure you want to delete this archive?')) return;
             
             try {
                 const response = await fetch('/api/archives/' + id, {
@@ -1231,19 +1206,19 @@ HTML_FOOTER = """
                 });
                 const data = await response.json();
                 if (data.success) {
-                    alert('✅ আর্কাইভ সফলভাবে মুছে ফেলা হয়েছে!');
+                    alert('Archive deleted successfully!');
                     loadArchives();
                 } else {
-                    alert('❌ ' + data.message);
+                    alert('Failed to delete archive: ' + data.message);
                 }
             } catch (e) {
-                alert('❌ আর্কাইভ মুছতে ব্যর্থ');
+                alert('Failed to delete archive');
             }
         }
         
         function getSelectedIds() {
             if (isMobile()) {
-                alert('বাল্ক অপারেশন শুধুমাত্র ডেস্কটপ ভিউতে উপলব্ধ');
+                alert('Bulk actions are only available on desktop view');
                 return [];
             }
             return Array.from(document.querySelectorAll('#archives-table-body input[type="checkbox"]:checked'))
@@ -1252,7 +1227,7 @@ HTML_FOOTER = """
         
         async function processSelected() {
             const selected = getSelectedIds();
-            if (selected.length === ০) return;
+            if (selected.length === 0) return;
             
             try {
                 for (const id of selected) {
@@ -1262,48 +1237,48 @@ HTML_FOOTER = """
                         body: JSON.stringify({status: 'pending'})
                     });
                 }
-                alert('✅ নির্বাচিত আর্কাইভগুলো অপেক্ষমান হিসেবে চিহ্নিত করা হয়েছে');
+                alert('Selected archives marked as pending');
                 loadArchives();
             } catch (e) {
-                alert('❌ নির্বাচিত আর্কাইভ প্রক্রিয়া করতে ব্যর্থ');
+                alert('Failed to process selected archives');
             }
         }
         
         async function resetSelected() {
             const selected = getSelectedIds();
-            if (selected.length === ০) return;
+            if (selected.length === 0) return;
             
-            if (!confirm('ব্যর্থ আর্কাইভগুলো রিসেট করতে চান?')) return;
+            if (!confirm('Reset selected failed archives?')) return;
             
             try {
                 for (const id of selected) {
                     await fetch('/api/archives/' + id, {
                         method: 'PUT',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({status: 'pending', retry_count: ০})
+                        body: JSON.stringify({status: 'pending', retry_count: 0})
                     });
                 }
-                alert('✅ নির্বাচিত আর্কাইভ রিসেট করা হয়েছে');
+                alert('Selected archives reset');
                 loadArchives();
             } catch (e) {
-                alert('❌ আর্কাইভ রিসেট করতে ব্যর্থ');
+                alert('Failed to reset archives');
             }
         }
         
         async function deleteSelected() {
             const selected = getSelectedIds();
-            if (selected.length === ০) return;
+            if (selected.length === 0) return;
             
-            if (!confirm(`আপনি কি নিশ্চিত ${selected.length}টি আর্কাইভ মুছে ফেলতে চান?`)) return;
+            if (!confirm(`Are you sure you want to delete ${selected.length} archives?`)) return;
             
             try {
                 for (const id of selected) {
                     await fetch('/api/archives/' + id, {method: 'DELETE'});
                 }
-                alert('✅ নির্বাচিত আর্কাইভ মুছে ফেলা হয়েছে');
+                alert('Selected archives deleted');
                 loadArchives();
             } catch (e) {
-                alert('❌ আর্কাইভ মুছতে ব্যর্থ');
+                alert('Failed to delete archives');
             }
         }
         
@@ -1316,10 +1291,10 @@ HTML_FOOTER = """
                     `✅ ${data.mongodb.message}` : `❌ ${data.mongodb.message}`;
                 document.getElementById('hf-status').innerHTML = data.hf.connected ? 
                     `✅ ${data.hf.message}` : `❌ ${data.hf.message}`;
-                document.getElementById('active-tasks').innerHTML = data.active_tasks || ০;
-                document.getElementById('total-completed').innerHTML = data.total_completed || ০;
-                document.getElementById('total-pending').innerHTML = data.total_pending || ০;
-                document.getElementById('total-failed').innerHTML = data.total_failed || ০;
+                document.getElementById('active-tasks').innerHTML = data.active_tasks || 0;
+                document.getElementById('total-completed').innerHTML = data.total_completed || 0;
+                document.getElementById('total-pending').innerHTML = data.total_pending || 0;
+                document.getElementById('total-failed').innerHTML = data.total_failed || 0;
             } catch (e) {
                 console.error('Failed to load monitor status:', e);
             }
@@ -1327,7 +1302,7 @@ HTML_FOOTER = """
         
         document.addEventListener('DOMContentLoaded', function() {
             loadArchives();
-            setInterval(loadArchives, ৩০০০০);
+            setInterval(loadArchives, 30000);
         });
     </script>
 </body>
@@ -1338,7 +1313,7 @@ HTML_FOOTER = """
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """প্রধান ড্যাশবোর্ড"""
+    """Main dashboard"""
 
     config = config_manager.get_config()
 
@@ -1355,7 +1330,7 @@ async def home(request: Request):
         <!-- Configuration Tab -->
         <div id="config-tab" class="tab-content active">
             <h2>⚙️ সিস্টেম কনফিগারেশন</h2>
-            <p style="color: #৬৬৬; margin-bottom: ২৫px; font-size: ১৬px;">MongoDB এবং Pinecone কনফিগারেশন সেট করুন</p>
+            <p style="color: #666; margin-bottom: 25px; font-size: 16px;">MongoDB এবং Pinecone কনফিগারেশন সেট করুন</p>
             
             <form id="config-form" onsubmit="saveConfig(event)">
                 <div class="form-grid">
@@ -1366,7 +1341,7 @@ async def home(request: Request):
                     <div class="form-group full-width">
                         <label for="mongodb_uri">MongoDB কানেকশন URI *</label>
                         <input type="text" id="mongodb_uri" name="mongodb_uri" value="{config.get('mongodb_uri', '')}" placeholder="mongodb+srv://username:password@cluster.mongodb.net/" required>
-                        <button type="button" class="btn btn-secondary" onclick="testMongoDB()" style="margin-top: ১২px;">🔌 সংযোগ পরীক্ষা</button>
+                        <button type="button" class="btn btn-secondary" onclick="testMongoDB()" style="margin-top: 12px;">🔌 সংযোগ পরীক্ষা</button>
                         <div id="mongodb-test-result"></div>
                     </div>
                     
@@ -1400,8 +1375,8 @@ async def home(request: Request):
                     
                     <div class="form-group">
                         <label for="priority_default">ডিফল্ট অগ্রাধিকার</label>
-                        <input type="number" id="priority_default" name="priority_default" value="{config.get('priority_default', ৫)}" min="১" max="১০">
-                        <small>১ = সর্বনিম্ন, ১০ = সর্বোচ্চ</small>
+                        <input type="number" id="priority_default" name="priority_default" value="{config.get('priority_default', 5)}" min="1" max="10">
+                        <small>1 = সর্বনিম্ন, 10 = সর্বোচ্চ</small>
                     </div>
                 </div>
                 
@@ -1415,75 +1390,75 @@ async def home(request: Request):
         <!-- Archives Management Tab -->
         <div id="archives-tab" class="tab-content">
             <h2>📁 ইন্টারনেট আর্কাইভ ব্যবস্থাপনা</h2>
-            <p style="color: #৬৬৬; margin-bottom: ২৫px; font-size: ১৬px;">নতুন আর্কাইভ যোগ করুন এবং প্রসেসিং সেটিংস কনফিগার করুন</p>
+            <p style="color: #666; margin-bottom: 25px; font-size: 16px;">নতুন আর্কাইভ যোগ করুন এবং প্রসেসিং সেটিংস কনফিগার করুন</p>
             
             <div class="card">
                 <h3>➕ নতুন আর্কাইভ যোগ করুন</h3>
                 <form id="add-archive-form" onsubmit="addArchive(event)">
                     
                     <h4>📋 সাধারণ তথ্য</h4>
-                    <div style="display: grid; grid-template-columns: ২fr ৪fr ১fr; gap: ২০px; align-items: end;">
+                    <div style="display: grid; grid-template-columns: 2fr 4fr 1fr; gap: 20px; align-items: end;">
                         <div>
                             <label for="book_name">📚 বইয়ের নাম *</label>
-                            <input type="text" id="book_name" placeholder="তাফসীর ফী যিলালিল কোরআন" required style="padding: ১৪px;">
+                            <input type="text" id="book_name" placeholder="তাফসীর ফী যিলালিল কোরআন" required style="padding: 14px;">
                         </div>
                         <div>
                             <label for="archive_url">🔗 আর্কাইভ URL *</label>
-                            <input type="text" id="archive_url" placeholder="https://archive.org/details/..." required style="padding: ১৪px;">
+                            <input type="text" id="archive_url" placeholder="https://archive.org/details/..." required style="padding: 14px;">
                         </div>
                         <div>
-                            <label for="priority">⚡ অগ্রাধিকার (১-১০)</label>
-                            <input type="number" id="priority" value="৫" min="১" max="১০" style="padding: ১৪px;">
+                            <label for="priority">⚡ অগ্রাধিকার (1-10)</label>
+                            <input type="number" id="priority" value="5" min="1" max="10" style="padding: 14px;">
                         </div>
                     </div>
                     
                     <h4>⚙️ প্রসেসিং সেটিংস</h4>
                     <div class="settings-section">
-                        <div style="display: grid; grid-template-columns: repeat(৪, ১fr); gap: ২০px;">
+                        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px;">
                             <div>
                                 <label for="pdf_batch_size">📦 PDF ব্যাচ</label>
-                                <input type="number" id="pdf_batch_size" value="৫০" min="১০" max="২০০" style="padding: ১২px;">
-                                <small>একসাথে কনভার্ট (১০-২০০)</small>
+                                <input type="number" id="pdf_batch_size" value="50" min="10" max="200" style="padding: 12px;">
+                                <small>একসাথে কনভার্ট (10-200)</small>
                             </div>
                             <div>
                                 <label for="max_files_per_commit">📤 সর্বোচ্চ ফাইল</label>
-                                <input type="number" id="max_files_per_commit" value="৫০" min="১০" max="১০০" style="padding: ১২px;">
-                                <small>প্রতি কমিটে (১০-১০০)</small>
+                                <input type="number" id="max_files_per_commit" value="50" min="10" max="100" style="padding: 12px;">
+                                <small>প্রতি কমিটে (10-100)</small>
                             </div>
                             <div>
                                 <label for="max_pdfs_per_run">📚 সর্বোচ্চ PDF</label>
-                                <input type="number" id="max_pdfs_per_run" value="২০" min="১" max="১০০" style="padding: ১২px;">
-                                <small>প্রতি রানে (১-১০০)</small>
+                                <input type="number" id="max_pdfs_per_run" value="20" min="1" max="100" style="padding: 12px;">
+                                <small>প্রতি রানে (1-100)</small>
                             </div>
                             <div>
                                 <label for="image_zoom">🔍 জুম</label>
-                                <input type="number" id="image_zoom" value="৩.০" min="১.০" max="৫.০" step="০.৫" style="padding: ১২px;">
-                                <small>১.০ - ৫.০</small>
+                                <input type="number" id="image_zoom" value="3.0" min="1.0" max="5.0" step="0.5" style="padding: 12px;">
+                                <small>1.0 - 5.0</small>
                             </div>
                             <div>
                                 <label for="image_dpi">🖼️ DPI</label>
-                                <input type="number" id="image_dpi" value="২০০" min="৭২" max="৪০০" style="padding: ১২px;">
-                                <small>৭২ - ৪০০ DPI</small>
+                                <input type="number" id="image_dpi" value="200" min="72" max="400" style="padding: 12px;">
+                                <small>72 - 400 DPI</small>
                             </div>
                             <div>
                                 <label for="max_parallel_pdfs">⚡ প্যারালাল</label>
-                                <input type="number" id="max_parallel_pdfs" value="২" min="১" max="৫" style="padding: ১২px;">
-                                <small>একসাথে PDF (১-৫)</small>
+                                <input type="number" id="max_parallel_pdfs" value="2" min="1" max="5" style="padding: 12px;">
+                                <small>একসাথে PDF (1-5)</small>
                             </div>
                             <div>
                                 <label for="max_workers">🔄 ওয়ার্কার</label>
-                                <input type="number" id="max_workers" value="২" min="১" max="৫" style="padding: ১২px;">
-                                <small>ডাউনলোড থ্রেড (১-৫)</small>
+                                <input type="number" id="max_workers" value="2" min="1" max="5" style="padding: 12px;">
+                                <small>ডাউনলোড থ্রেড (1-5)</small>
                             </div>
                         </div>
                     </div>
                     
                     <h4>🔤 OCR সেটিংস</h4>
                     <div class="settings-section">
-                        <div style="display: grid; grid-template-columns: repeat(৩, ১fr); gap: ২০px;">
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;">
                             <div>
-                                <label for="ocr_lang_১">ভাষা ১ (প্রাথমিক) *</label>
-                                <select id="ocr_lang_১" style="padding: ১২px;">
+                                <label for="ocr_lang_1">ভাষা 1 (প্রাথমিক) *</label>
+                                <select id="ocr_lang_1" style="padding: 12px;">
                                     <option value="ben" selected>🇧🇩 বাংলা</option>
                                     <option value="ara">🇸🇦 আরবি</option>
                                     <option value="eng">🇬🇧 ইংরেজি</option>
@@ -1493,8 +1468,8 @@ async def home(request: Request):
                                 </select>
                             </div>
                             <div>
-                                <label for="ocr_lang_২">ভাষা ২ (ঐচ্ছিক)</label>
-                                <select id="ocr_lang_২" style="padding: ১২px;">
+                                <label for="ocr_lang_2">ভাষা 2 (ঐচ্ছিক)</label>
+                                <select id="ocr_lang_2" style="padding: 12px;">
                                     <option value="" selected>-- কোনোটি নয় --</option>
                                     <option value="ben">🇧🇩 বাংলা</option>
                                     <option value="ara">🇸🇦 আরবি</option>
@@ -1505,8 +1480,8 @@ async def home(request: Request):
                                 </select>
                             </div>
                             <div>
-                                <label for="ocr_lang_৩">ভাষা ৩ (ঐচ্ছিক)</label>
-                                <select id="ocr_lang_৩" style="padding: ১২px;">
+                                <label for="ocr_lang_3">ভাষা 3 (ঐচ্ছিক)</label>
+                                <select id="ocr_lang_3" style="padding: 12px;">
                                     <option value="" selected>-- কোনোটি নয় --</option>
                                     <option value="ben">🇧🇩 বাংলা</option>
                                     <option value="ara">🇸🇦 আরবি</option>
@@ -1517,38 +1492,38 @@ async def home(request: Request):
                                 </select>
                             </div>
                         </div>
-                        <div style="display: grid; grid-template-columns: repeat(৩, ১fr); gap: ২০px; margin-top: ১৫px;">
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 15px;">
                             <div>
                                 <label for="ocr_oem">OCR ইঞ্জিন মোড</label>
-                                <select id="ocr_oem" style="padding: ১২px;">
-                                    <option value="৩" selected>৩ - LSTM নিউরাল (সেরা)</option>
-                                    <option value="১">১ - শুধু LSTM</option>
-                                    <option value="২">২ - LSTM + লিগ্যাসি</option>
-                                    <option value="০">০ - শুধু লিগ্যাসি</option>
+                                <select id="ocr_oem" style="padding: 12px;">
+                                    <option value="3" selected>3 - LSTM নিউরাল (সেরা)</option>
+                                    <option value="1">1 - শুধু LSTM</option>
+                                    <option value="2">2 - LSTM + লিগ্যাসি</option>
+                                    <option value="0">0 - শুধু লিগ্যাসি</option>
                                 </select>
                             </div>
                             <div>
                                 <label for="ocr_psm">পৃষ্ঠা সেগমেন্টেশন</label>
-                                <select id="ocr_psm" style="padding: ১২px;">
-                                    <option value="৩" selected>৩ - স্বয়ংক্রিয়</option>
-                                    <option value="৬">৬ - সমান টেক্সট ব্লক</option>
-                                    <option value="১">১ - OSD সহ স্বয়ংক্রিয়</option>
-                                    <option value="৪">৪ - একক কলাম</option>
-                                    <option value="৭">৭ - একক টেক্সট লাইন</option>
-                                    <option value="৮">৮ - একক শব্দ</option>
-                                    <option value="১১">১১ - বিক্ষিপ্ত টেক্সট</option>
+                                <select id="ocr_psm" style="padding: 12px;">
+                                    <option value="3" selected>3 - স্বয়ংক্রিয়</option>
+                                    <option value="6">6 - সমান টেক্সট ব্লক</option>
+                                    <option value="1">1 - OSD সহ স্বয়ংক্রিয়</option>
+                                    <option value="4">4 - একক কলাম</option>
+                                    <option value="7">7 - একক টেক্সট লাইন</option>
+                                    <option value="8">8 - একক শব্দ</option>
+                                    <option value="11">11 - বিক্ষিপ্ত টেক্সট</option>
                                 </select>
                             </div>
                             <div>
                                 <label for="ocr_workers">OCR ওয়ার্কার</label>
-                                <input type="number" id="ocr_workers" value="২" min="১" max="৪" style="padding: ১২px;">
-                                <small>প্যারালাল থ্রেড (১-৪)</small>
+                                <input type="number" id="ocr_workers" value="2" min="1" max="4" style="padding: 12px;">
+                                <small>প্যারালাল থ্রেড (1-4)</small>
                             </div>
                         </div>
                     </div>
                     
-                    <div style="margin-top: ২০px; display: flex; justify-content: flex-end;">
-                        <button type="submit" class="btn btn-primary" style="padding: ১৪px ৩২px;">➕ আর্কাইভ যোগ করুন</button>
+                    <div style="margin-top: 20px; display: flex; justify-content: flex-end;">
+                        <button type="submit" class="btn btn-primary" style="padding: 14px 32px;">➕ আর্কাইভ যোগ করুন</button>
                     </div>
                 </form>
             </div>
@@ -1562,7 +1537,7 @@ async def home(request: Request):
                 <table>
                     <thead>
                         <tr>
-                            <th style="width: ৪০px;"><input type="checkbox" id="select-all-checkbox" onclick="document.querySelectorAll('#archives-table-body input[type=checkbox]').forEach(cb=>cb.checked=this.checked)"></th>
+                            <th style="width: 40px;"><input type="checkbox" id="select-all-checkbox" onclick="document.querySelectorAll('#archives-table-body input[type=checkbox]').forEach(cb=>cb.checked=this.checked)"></th>
                             <th>বইয়ের নাম</th>
                             <th>URL</th>
                             <th>অবস্থা</th>
@@ -1570,11 +1545,11 @@ async def home(request: Request):
                             <th>ব্যাচ</th>
                             <th>অগ্রগতি</th>
                             <th>সর্বশেষ আপডেট</th>
-                            <th style="width: ১০০px;">কার্যক্রম</th>
+                            <th style="width: 100px;">কার্যক্রম</th>
                         </tr>
                     </thead>
                     <tbody id="archives-table-body">
-                        <tr><td colspan="৯" style="text-align: center; padding: ৪০px;">আর্কাইভ লোড হচ্ছে...</td></tr>
+                        <tr><td colspan="9" style="text-align: center; padding: 40px;">আর্কাইভ লোড হচ্ছে...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1589,38 +1564,38 @@ async def home(request: Request):
         <!-- Monitor Tab -->
         <div id="monitor-tab" class="tab-content">
             <h2>📊 সিস্টেম মনিটর</h2>
-            <p style="color: #৬৬৬; margin-bottom: ২৫px; font-size: ১৬px;">সিস্টেম অবস্থা এবং সংযোগ পর্যবেক্ষণ</p>
+            <p style="color: #666; margin-bottom: 25px; font-size: 16px;">সিস্টেম অবস্থা এবং সংযোগ পর্যবেক্ষণ</p>
             
-            <div style="display: grid; grid-template-columns: repeat(২, ১fr); gap: ২৫px;">
-                <div style="background: linear-gradient(১৩৫deg, #১a৫f৭a, #০d৩b৪c); color: white; padding: ৩০px; border-radius: ১৫px;">
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 25px;">
+                <div style="background: linear-gradient(135deg, #1a5f7a, #0d3b4c); color: white; padding: 30px; border-radius: 15px;">
                     <h3 style="color: white;">🗄️ MongoDB অবস্থা</h3>
-                    <div id="mongodb-status" style="font-size: ১৬px; margin-top: ১৫px;">পরীক্ষা করতে মনিটর ট্যাবে ক্লিক করুন</div>
+                    <div id="mongodb-status" style="font-size: 16px; margin-top: 15px;">পরীক্ষা করতে মনিটর ট্যাবে ক্লিক করুন</div>
                 </div>
                 
-                <div style="background: linear-gradient(১৩৫deg, #f০৯৩fb, #f৫৫৭৬c); color: white; padding: ৩০px; border-radius: ১৫px;">
+                <div style="background: linear-gradient(135deg, #f093fb, #f5576c); color: white; padding: 30px; border-radius: 15px;">
                     <h3 style="color: white;">🌲 Pinecone অবস্থা</h3>
-                    <div id="hf-status" style="font-size: ১৬px; margin-top: ১৫px;">পরীক্ষা করতে মনিটর ট্যাবে ক্লিক করুন</div>
+                    <div id="hf-status" style="font-size: 16px; margin-top: 15px;">পরীক্ষা করতে মনিটর ট্যাবে ক্লিক করুন</div>
                 </div>
             </div>
             
-            <div style="margin-top: ৩০px; background: white; padding: ২৫px; border-radius: ১৫px; border: ১px solid #e০e০e০;">
+            <div style="margin-top: 30px; background: white; padding: 25px; border-radius: 15px; border: 1px solid #e0e0e0;">
                 <h3>📈 প্রসেসিং পরিসংখ্যান</h3>
-                <div style="display: grid; grid-template-columns: repeat(৪, ১fr); gap: ২০px; margin-top: ২০px;" class="grid">
+                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 20px;" class="grid">
                     <div style="text-align: center;">
-                        <div style="font-size: ৩৬px; font-weight: bold; color: #১a৫f৭a;" id="active-tasks">০</div>
-                        <div style="color: #৬৬৬;">সক্রিয় কাজ</div>
+                        <div style="font-size: 36px; font-weight: bold; color: #1a5f7a;" id="active-tasks">0</div>
+                        <div style="color: #666;">সক্রিয় কাজ</div>
                     </div>
                     <div style="text-align: center;">
-                        <div style="font-size: ৩৬px; font-weight: bold; color: #২৮a৭৪৫;" id="total-completed">০</div>
-                        <div style="color: #৬৬৬;">সম্পন্ন</div>
+                        <div style="font-size: 36px; font-weight: bold; color: #28a745;" id="total-completed">0</div>
+                        <div style="color: #666;">সম্পন্ন</div>
                     </div>
                     <div style="text-align: center;">
-                        <div style="font-size: ৩৬px; font-weight: bold; color: #ffc১০৭;" id="total-pending">০</div>
-                        <div style="color: #৬৬৬;">অপেক্ষমান</div>
+                        <div style="font-size: 36px; font-weight: bold; color: #ffc107;" id="total-pending">0</div>
+                        <div style="color: #666;">অপেক্ষমান</div>
                     </div>
                     <div style="text-align: center;">
-                        <div style="font-size: ৩৬px; font-weight: bold; color: #dc৩৫৪৫;" id="total-failed">০</div>
-                        <div style="color: #৬৬৬;">ব্যর্থ</div>
+                        <div style="font-size: 36px; font-weight: bold; color: #dc3545;" id="total-failed">0</div>
+                        <div style="color: #666;">ব্যর্থ</div>
                     </div>
                 </div>
             </div>
@@ -1633,8 +1608,8 @@ async def home(request: Request):
 
 @app.get("/health")
 async def health_check():
-    """স্বাস্থ্য পরীক্ষা এন্ডপয়েন্ট"""
-    return {"status": "সুস্থ", "timestamp": datetime.utcnow().isoformat()}
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 @app.get("/api/config")
 async def get_config():
@@ -1642,49 +1617,49 @@ async def get_config():
 
 @app.post("/api/config")
 async def save_config(config: SystemConfig):
-    """কনফিগারেশন সংরক্ষণ"""
-    print(f"[API] কনফিগারেশন সংরক্ষণ হচ্ছে...")
+    """Save configuration"""
+    print(f"[API] Saving configuration...")
 
     config_dict = config.dict()
 
     if config.mongodb_uri:
-        print(f"[API] MongoDB ইনিশিয়ালাইজ হচ্ছে...")
+        print(f"[API] Initializing MongoDB...")
         init_success = config_manager.initialize(config.mongodb_uri, "tafsir_config")
         if init_success:
-            print(f"[API] ✅ MongoDB সফলভাবে ইনিশিয়ালাইজ হয়েছে")
+            print(f"[API] MongoDB initialized successfully")
         else:
-            print(f"[API] ❌ MongoDB ইনিশিয়ালাইজেশন ব্যর্থ")
+            print(f"[API] MongoDB initialization failed")
 
     success = config_manager.save_config(config_dict)
 
     if success:
-        return {"success": True, "message": "কনফিগারেশন সফলভাবে সংরক্ষিত"}
+        return {"success": True, "message": "Configuration saved successfully"}
     else:
-        return {"success": False, "message": "কনফিগারেশন সংরক্ষণ ব্যর্থ"}
+        return {"success": False, "message": "Failed to save configuration"}
 
 @app.post("/api/test/mongodb")
 async def test_mongodb(request: Request):
     data = await request.json()
     uri = data.get("uri", "")
     if not uri:
-        return {"success": False, "message": "URI প্রয়োজন"}
+        return {"success": False, "message": "URI is required"}
     success, message = config_manager.test_mongodb_connection(uri)
     return {"success": success, "message": message}
 
 @app.get("/api/archives")
 async def get_archives():
-    """সকল আর্কাইভ আইটেম পান"""
+    """Get all archive items"""
     return config_manager.get_archives()
 
 @app.post("/api/archives")
 async def add_archive(item: ArchiveItem):
-    """নতুন আর্কাইভ আইটেম যোগ করুন"""
+    """Add a new archive item"""
     archive_data = {
         "book_name": item.book_name,
         "url": item.archive_url,
         "status": "pending",
         "priority": item.priority,
-        "retry_count": ০,
+        "retry_count": 0,
         "metadata": item.metadata or {},
         "processing_settings": {
             "pdf_batch_size": item.pdf_batch_size,
@@ -1704,13 +1679,13 @@ async def add_archive(item: ArchiveItem):
     success, result = config_manager.add_archive(archive_data)
 
     if success:
-        return {"success": True, "message": "আর্কাইভ সফলভাবে যোগ করা হয়েছে", "id": result}
+        return {"success": True, "message": "Archive added successfully", "id": result}
     else:
         return {"success": False, "message": result}
 
 @app.put("/api/archives/{archive_id}")
 async def update_archive(archive_id: str, item: ArchiveUpdateModel):
-    """আর্কাইভ আইটেম আপডেট করুন"""
+    """Update an archive item"""
     update_data = {}
 
     if item.book_name is not None:
@@ -1722,7 +1697,7 @@ async def update_archive(archive_id: str, item: ArchiveUpdateModel):
     if item.status is not None:
         update_data["status"] = item.status
         if item.status == "pending":
-            update_data["retry_count"] = ০
+            update_data["retry_count"] = 0
     if item.retry_count is not None:
         update_data["retry_count"] = item.retry_count
     if item.pdf_batch_size is not None:
@@ -1753,18 +1728,18 @@ async def update_archive(archive_id: str, item: ArchiveUpdateModel):
 
 @app.delete("/api/archives/{archive_id}")
 async def delete_archive(archive_id: str):
-    """আর্কাইভ আইটেম মুছুন"""
+    """Delete an archive item"""
     success, message = config_manager.delete_archive(archive_id)
     return {"success": success, "message": message}
 
 @app.get("/api/monitor/status")
 async def get_system_status():
-    """মনিটরিংয়ের জন্য সিস্টেম অবস্থা"""
+    """Get system status for monitoring"""
     config = config_manager.get_config()
 
-    mongodb_status = {"connected": False, "message": "কনফিগার করা হয়নি"}
+    mongodb_status = {"connected": False, "message": "Not configured"}
     if config_manager.is_connected:
-        mongodb_status = {"connected": True, "message": "MongoDB-তে সংযুক্ত"}
+        mongodb_status = {"connected": True, "message": "Connected to MongoDB"}
     elif config.get("mongodb_uri"):
         success, message = config_manager.test_mongodb_connection(config["mongodb_uri"])
         if success:
@@ -1773,7 +1748,7 @@ async def get_system_status():
         else:
             mongodb_status = {"connected": False, "message": message}
 
-    hf_status = {"connected": False, "message": "Pinecone কনফিগার করা হয়নি"}
+    hf_status = {"connected": False, "message": "Pinecone not configured"}
 
     stats = config_manager.get_statistics()
 
@@ -1787,8 +1762,8 @@ async def get_system_status():
 
 @app.on_event("startup")
 async def startup_event():
-    """স্টার্টআপে ইনিশিয়ালাইজ"""
-    print("[Startup] ইনিশিয়ালাইজ হচ্ছে...")
+    """Initialize on startup"""
+    print("[Startup] Initializing...")
 
     if CONFIG_FILE.exists():
         try:
@@ -1796,15 +1771,15 @@ async def startup_event():
                 config = json.load(f)
 
             if config.get("mongodb_uri"):
-                print(f"[Startup] সংরক্ষিত কনফিগারেশন পাওয়া গেছে, MongoDB-তে সংযোগ হচ্ছে...")
+                print(f"[Startup] Found saved config, connecting to MongoDB...")
                 config_manager.initialize(config["mongodb_uri"], "tafsir_config")
         except Exception as e:
-            print(f"[Startup] কনফিগারেশন লোড করতে ব্যর্থ: {e}")
+            print(f"[Startup] Failed to load config: {e}")
 
-    print("[Startup] ✅ ইনিশিয়ালাইজেশন সম্পূর্ণ")
+    print("[Startup] Initialization complete")
 
 # ============ Main ============
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", ৮০০০))
-    uvicorn.run(app, host="০.০.০.০", port=port)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
