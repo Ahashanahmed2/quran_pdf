@@ -94,6 +94,7 @@ class ConfigManager:
         self.client = None
         self.db = None
         self.is_connected = False
+        self.archive_collection = None
 
     def initialize(self, mongodb_uri: str = None, db_name: str = "tafsir_config"):
         """Initialize MongoDB connection"""
@@ -108,8 +109,14 @@ class ConfigManager:
 
             self.db = self.client[db_name]
             self.config_collection = self.db["system_config"]
+            
+            # Archive collection-ও initialize করুন
+            data_db_name = DEFAULT_CONFIG.get("mongodb_db", "tafsir_db")
+            data_collection_name = DEFAULT_CONFIG.get("mongodb_collection", "archive_links")
+            data_db = self.client[data_db_name]
+            self.archive_collection = data_db[data_collection_name]
+            
             self.is_connected = True
-
             print(f"[ConfigManager] ✅ Connected to MongoDB: {db_name}")
             return True
 
@@ -158,6 +165,16 @@ class ConfigManager:
                 saved = self.config_collection.find_one({"_id": "current"})
                 if saved:
                     print(f"[ConfigManager] ✅ Verified - Config exists in MongoDB")
+                    
+                    # MongoDB URI সেভ হলে archive collection রি-ইনিশিয়ালাইজ
+                    if config.get("mongodb_uri") and config.get("mongodb_db") and config.get("mongodb_collection"):
+                        try:
+                            data_db = self.client[config["mongodb_db"]]
+                            self.archive_collection = data_db[config["mongodb_collection"]]
+                            print(f"[ConfigManager] ✅ Archive collection initialized: {config['mongodb_db']}.{config['mongodb_collection']}")
+                        except Exception as e:
+                            print(f"[ConfigManager] ⚠️ Failed to initialize archive collection: {e}")
+                    
                     return True
 
             except Exception as e:
@@ -195,6 +212,141 @@ class ConfigManager:
             return True, f"Connected as {user.get('name', 'Unknown')}"
         except Exception as e:
             return False, str(e)
+
+    def get_archives(self, limit: int = 100) -> List[Dict]:
+        """Get all archive items"""
+        if not self.is_connected or self.archive_collection is None:
+            print("[ConfigManager] ⚠️ Not connected to archive collection")
+            return []
+        
+        try:
+            archives = list(self.archive_collection.find().sort("created_at", -1).limit(limit))
+            for archive in archives:
+                archive["_id"] = str(archive["_id"])
+                if "created_at" in archive:
+                    archive["created_at"] = archive["created_at"].isoformat()
+                if "updated_at" in archive:
+                    archive["updated_at"] = archive["updated_at"].isoformat()
+            return archives
+        except Exception as e:
+            print(f"[ConfigManager] Failed to fetch archives: {e}")
+            return []
+
+    def add_archive(self, archive_data: Dict) -> tuple:
+        """Add a new archive item"""
+        if not self.is_connected or self.archive_collection is None:
+            return False, "MongoDB not connected"
+        
+        try:
+            import re
+            doc_id = re.sub(r'[^\w\-_]', '_', archive_data.get("book_name", "").lower().replace(' ', '_'))
+            
+            # Check duplicate by ID
+            existing = self.archive_collection.find_one({"_id": doc_id})
+            if existing:
+                return False, f"Archive already exists with Book Name: '{archive_data.get('book_name')}'"
+            
+            # Check duplicate by URL
+            existing_url = self.archive_collection.find_one({"url": archive_data.get("url")})
+            if existing_url:
+                return False, f"URL already exists under: '{existing_url.get('book_name')}'"
+            
+            document = {
+                "_id": doc_id,
+                **archive_data,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            self.archive_collection.insert_one(document)
+            return True, doc_id
+            
+        except DuplicateKeyError:
+            return False, "Archive URL already exists"
+        except Exception as e:
+            return False, str(e)
+
+    def update_archive(self, archive_id: str, update_data: Dict) -> tuple:
+        """Update an archive item"""
+        if not self.is_connected or self.archive_collection is None:
+            return False, "MongoDB not connected"
+        
+        try:
+            existing = self.archive_collection.find_one({"_id": archive_id})
+            if not existing:
+                return False, "Archive not found"
+            
+            # Check URL duplicate if changing
+            if "url" in update_data and update_data["url"] != existing.get("url"):
+                url_exists = self.archive_collection.find_one({"url": update_data["url"], "_id": {"$ne": archive_id}})
+                if url_exists:
+                    return False, f"URL already exists under: '{url_exists.get('book_name')}'"
+            
+            update_data["updated_at"] = datetime.utcnow()
+            
+            # Handle nested processing_settings
+            final_update = {}
+            for key, value in update_data.items():
+                if key.startswith("processing_settings."):
+                    final_update[key] = value
+                else:
+                    final_update[key] = value
+            
+            self.archive_collection.update_one({"_id": archive_id}, {"$set": final_update})
+            return True, "Archive updated successfully"
+            
+        except Exception as e:
+            return False, str(e)
+
+    def delete_archive(self, archive_id: str) -> tuple:
+        """Delete an archive item"""
+        if not self.is_connected or self.archive_collection is None:
+            return False, "MongoDB not connected"
+        
+        try:
+            result = self.archive_collection.delete_one({"_id": archive_id})
+            if result.deleted_count > 0:
+                return True, "Archive deleted successfully"
+            else:
+                return False, "Archive not found"
+        except Exception as e:
+            return False, str(e)
+
+    def get_statistics(self) -> Dict:
+        """Get processing statistics"""
+        if not self.is_connected or self.archive_collection is None:
+            return {
+                "active_tasks": 0,
+                "total_completed": 0,
+                "total_pending": 0,
+                "total_failed": 0
+            }
+        
+        try:
+            return {
+                "active_tasks": self.archive_collection.count_documents({"status": "processing"}),
+                "total_completed": self.archive_collection.count_documents({"status": "completed"}),
+                "total_pending": self.archive_collection.count_documents({"status": "pending"}),
+                "total_failed": self.archive_collection.count_documents({"status": "failed"})
+            }
+        except Exception as e:
+            print(f"[ConfigManager] Failed to get statistics: {e}")
+            return {
+                "active_tasks": 0,
+                "total_completed": 0,
+                "total_pending": 0,
+                "total_failed": 0
+            }
+
+    def close(self):
+        """Close MongoDB connection"""
+        if self.client:
+            self.client.close()
+            self.client = None
+            self.db = None
+            self.config_collection = None
+            self.archive_collection = None
+            self.is_connected = False
 
 # ============ FastAPI App ============
 
@@ -466,7 +618,6 @@ HTML_HEADER = """
             width: 90%;
         }
         
-        /* Mobile Card View */
         .mobile-archive-card {
             background: #f8f9fa;
             padding: 15px;
@@ -475,7 +626,6 @@ HTML_HEADER = """
             border-left: 4px solid #1a5f7a;
         }
         
-        /* ============ Mobile Responsive Styles ============ */
         @media screen and (max-width: 768px) {
             body {
                 padding: 10px;
@@ -527,19 +677,6 @@ HTML_HEADER = """
                 gap: 15px;
             }
             
-            .table-container {
-                margin-top: 20px;
-            }
-            
-            table {
-                font-size: 12px;
-            }
-            
-            th, td {
-                padding: 10px 8px;
-                white-space: nowrap;
-            }
-            
             .btn {
                 padding: 12px 16px;
                 font-size: 14px;
@@ -551,10 +688,6 @@ HTML_HEADER = """
                 gap: 10px;
             }
             
-            .btn-group .btn {
-                width: 100%;
-            }
-            
             .card {
                 padding: 15px;
             }
@@ -562,85 +695,11 @@ HTML_HEADER = """
             .edit-form {
                 padding: 20px;
                 width: 95%;
-                max-height: 85vh;
-            }
-            
-            .edit-form .form-grid {
-                grid-template-columns: 1fr !important;
             }
             
             #monitor-tab > div:first-of-type {
                 grid-template-columns: 1fr !important;
                 gap: 15px;
-            }
-            
-            #monitor-tab .grid {
-                grid-template-columns: repeat(2, 1fr) !important;
-            }
-            
-            label {
-                font-size: 14px;
-            }
-            
-            input, select, textarea {
-                padding: 12px 14px;
-                font-size: 14px;
-            }
-            
-            small {
-                font-size: 11px;
-            }
-            
-            h2 {
-                font-size: 20px;
-            }
-            
-            h3 {
-                font-size: 16px;
-            }
-            
-            h4 {
-                font-size: 14px;
-            }
-            
-            .status-badge {
-                padding: 4px 8px;
-                font-size: 11px;
-            }
-            
-            .alert {
-                padding: 12px 15px;
-                font-size: 13px;
-            }
-        }
-        
-        @media screen and (max-width: 480px) {
-            .header h1 {
-                font-size: 18px;
-            }
-            
-            .nav-tab {
-                padding: 8px 12px;
-                font-size: 12px;
-            }
-            
-            .tab-content {
-                padding: 15px 10px;
-            }
-            
-            table th:nth-child(6),
-            table td:nth-child(6),
-            table th:nth-child(8),
-            table td:nth-child(8) {
-                display: none;
-            }
-            
-            #monitor-tab .grid > div > div:first-child {
-                font-size: 28px !important;
-            }
-            
-            #monitor-tab .grid > div > div:last-child {
-                font-size: 11px !important;
             }
         }
     </style>
@@ -728,7 +787,6 @@ HTML_FOOTER = """
     </div>
     
     <script>
-        // Detect mobile device
         function isMobile() {
             return window.innerWidth <= 768;
         }
@@ -844,7 +902,6 @@ HTML_FOOTER = """
                 const archives = await response.json();
                 
                 if (isMobile()) {
-                    // Mobile card view
                     const container = document.getElementById('mobile-archives-container');
                     const tableContainer = document.querySelector('.table-container');
                     
@@ -857,7 +914,6 @@ HTML_FOOTER = """
                     container.style.display = 'block';
                     if (tableContainer) tableContainer.style.display = 'none';
                 } else {
-                    // Desktop table view
                     const tbody = document.getElementById('archives-table-body');
                     const mobileContainer = document.getElementById('mobile-archives-container');
                     
@@ -918,11 +974,7 @@ HTML_FOOTER = """
                     document.getElementById('max_workers').value = '2';
                     loadArchives();
                 } else {
-                    if (data.existing_id) {
-                        alert(`❌ ${data.message}\\n\\nExisting Status: ${data.existing_status}\\nID: ${data.existing_id}`);
-                    } else {
-                        alert('❌ ' + data.message);
-                    }
+                    alert('❌ ' + data.message);
                 }
             } catch (e) {
                 alert('❌ Failed to add archive');
@@ -956,6 +1008,8 @@ HTML_FOOTER = """
                 
                 if (data.success) {
                     alert('✅ Configuration saved successfully!');
+                    // Reload config to update connection status
+                    setTimeout(() => location.reload(), 500);
                 } else {
                     alert('❌ Failed to save configuration: ' + data.message);
                 }
@@ -1057,7 +1111,6 @@ HTML_FOOTER = """
         
         function getSelectedIds() {
             if (isMobile()) {
-                // Mobile: no checkboxes, return empty
                 alert('Bulk actions are only available on desktop view');
                 return [];
             }
@@ -1387,13 +1440,17 @@ async def save_config(config: SystemConfig):
     print(f"[API] Saving configuration...")
 
     config_dict = config.dict()
-    success = config_manager.save_config(config_dict)
-
+    
+    # Initialize MongoDB first
     if config.mongodb_uri:
-        print(f"[API] Re-initializing MongoDB with new URI...")
+        print(f"[API] Initializing MongoDB with URI...")
         init_success = config_manager.initialize(config.mongodb_uri, "tafsir_config")
         if init_success:
-            config_manager.save_config(config_dict)
+            print(f"[API] ✅ MongoDB initialized successfully")
+        else:
+            print(f"[API] ❌ MongoDB initialization failed")
+
+    success = config_manager.save_config(config_dict)
 
     if success:
         return {"success": True, "message": "Configuration saved successfully"}
@@ -1420,210 +1477,109 @@ async def test_hf(request: Request):
 
 @app.get("/api/archives")
 async def get_archives():
-    config = config_manager.get_config()
-    if not config.get("mongodb_uri"):
-        return []
-    try:
-        client = MongoClient(config["mongodb_uri"])
-        db = client[config.get("mongodb_db", "tafsir_db")]
-        collection = db[config.get("mongodb_collection", "archive_links")]
-        archives = list(collection.find().sort("created_at", -1).limit(100))
-        for archive in archives:
-            archive["_id"] = str(archive["_id"])
-            if "created_at" in archive:
-                archive["created_at"] = archive["created_at"].isoformat()
-            if "updated_at" in archive:
-                archive["updated_at"] = archive["updated_at"].isoformat()
-        client.close()
-        return archives
-    except Exception as e:
-        print(f"Failed to fetch archives: {e}")
-        return []
+    """Get all archive items"""
+    return config_manager.get_archives()
 
 @app.post("/api/archives")
 async def add_archive(item: ArchiveItem):
-    config = config_manager.get_config()
-    if not config.get("mongodb_uri"):
-        return {"success": False, "message": "MongoDB not configured"}
-    
-    try:
-        client = MongoClient(config["mongodb_uri"])
-        db = client[config.get("mongodb_db", "tafsir_db")]
-        collection = db[config.get("mongodb_collection", "archive_links")]
-        import re
-        
-        try:
-            collection.create_index("url", unique=True)
-        except:
-            pass
-        
-        doc_id = re.sub(r'[^\w\-_]', '_', item.book_name.lower().replace(' ', '_'))
-        
-        existing_by_id = collection.find_one({"_id": doc_id})
-        if existing_by_id:
-            client.close()
-            return {
-                "success": False, 
-                "message": f"Archive already exists with Book Name: '{item.book_name}'",
-                "existing_id": doc_id,
-                "existing_status": existing_by_id.get("status")
-            }
-        
-        existing_by_url = collection.find_one({"url": item.archive_url})
-        if existing_by_url:
-            client.close()
-            return {
-                "success": False,
-                "message": f"Archive URL already exists under: '{existing_by_url.get('book_name')}'",
-                "existing_id": existing_by_url.get("_id"),
-                "existing_status": existing_by_url.get("status")
-            }
-        
-        document = {
-            "_id": doc_id,
-            "book_name": item.book_name,
-            "url": item.archive_url,
-            "status": "pending",
-            "priority": item.priority,
-            "retry_count": 0,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-            "metadata": item.metadata or {},
-            "processing_settings": {
-                "pdf_batch_size": item.pdf_batch_size,
-                "max_files_per_commit": item.max_files_per_commit,
-                "max_pdfs_per_run": item.max_pdfs_per_run,
-                "image_zoom": item.image_zoom,
-                "image_dpi": item.image_dpi,
-                "max_parallel_pdfs": item.max_parallel_pdfs,
-                "max_workers": item.max_workers
-            }
+    """Add a new archive item"""
+    archive_data = {
+        "book_name": item.book_name,
+        "url": item.archive_url,
+        "status": "pending",
+        "priority": item.priority,
+        "retry_count": 0,
+        "metadata": item.metadata or {},
+        "processing_settings": {
+            "pdf_batch_size": item.pdf_batch_size,
+            "max_files_per_commit": item.max_files_per_commit,
+            "max_pdfs_per_run": item.max_pdfs_per_run,
+            "image_zoom": item.image_zoom,
+            "image_dpi": item.image_dpi,
+            "max_parallel_pdfs": item.max_parallel_pdfs,
+            "max_workers": item.max_workers
         }
-        
-        collection.insert_one(document)
-        client.close()
-        return {"success": True, "message": "Archive added successfully", "id": doc_id}
-        
-    except DuplicateKeyError:
-        client.close()
-        return {"success": False, "message": "Archive URL already exists"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    }
+    
+    success, result = config_manager.add_archive(archive_data)
+    
+    if success:
+        return {"success": True, "message": "Archive added successfully", "id": result}
+    else:
+        return {"success": False, "message": result}
 
 @app.put("/api/archives/{archive_id}")
 async def update_archive(archive_id: str, item: ArchiveUpdateModel):
-    config = config_manager.get_config()
-    if not config.get("mongodb_uri"):
-        return {"success": False, "message": "MongoDB not configured"}
+    """Update an archive item"""
+    update_data = {}
     
-    try:
-        client = MongoClient(config["mongodb_uri"])
-        db = client[config.get("mongodb_db", "tafsir_db")]
-        collection = db[config.get("mongodb_collection", "archive_links")]
-        
-        existing = collection.find_one({"_id": archive_id})
-        if not existing:
-            client.close()
-            return {"success": False, "message": "Archive not found"}
-        
-        update_data = {"updated_at": datetime.utcnow()}
-        
-        if item.book_name is not None:
-            update_data["book_name"] = item.book_name
-        if item.archive_url is not None:
-            if item.archive_url != existing.get("url"):
-                url_exists = collection.find_one({"url": item.archive_url, "_id": {"$ne": archive_id}})
-                if url_exists:
-                    client.close()
-                    return {"success": False, "message": f"URL already exists under: '{url_exists.get('book_name')}'"}
-            update_data["url"] = item.archive_url
-        if item.priority is not None:
-            update_data["priority"] = item.priority
-        if item.status is not None:
-            update_data["status"] = item.status
-        if item.retry_count is not None:
-            update_data["retry_count"] = item.retry_count
-        if item.pdf_batch_size is not None:
-            update_data["processing_settings.pdf_batch_size"] = item.pdf_batch_size
-        if item.max_files_per_commit is not None:
-            update_data["processing_settings.max_files_per_commit"] = item.max_files_per_commit
-        if item.max_pdfs_per_run is not None:
-            update_data["processing_settings.max_pdfs_per_run"] = item.max_pdfs_per_run
-        if item.image_zoom is not None:
-            update_data["processing_settings.image_zoom"] = item.image_zoom
-        if item.image_dpi is not None:
-            update_data["processing_settings.image_dpi"] = item.image_dpi
-        if item.max_parallel_pdfs is not None:
-            update_data["processing_settings.max_parallel_pdfs"] = item.max_parallel_pdfs
-        if item.max_workers is not None:
-            update_data["processing_settings.max_workers"] = item.max_workers
-        
+    if item.book_name is not None:
+        update_data["book_name"] = item.book_name
+    if item.archive_url is not None:
+        update_data["url"] = item.archive_url
+    if item.priority is not None:
+        update_data["priority"] = item.priority
+    if item.status is not None:
+        update_data["status"] = item.status
         if item.status == "pending":
             update_data["retry_count"] = 0
-        
-        collection.update_one({"_id": archive_id}, {"$set": update_data})
-        client.close()
-        
-        return {"success": True, "message": "Archive updated successfully"}
-        
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    if item.retry_count is not None:
+        update_data["retry_count"] = item.retry_count
+    if item.pdf_batch_size is not None:
+        update_data["processing_settings.pdf_batch_size"] = item.pdf_batch_size
+    if item.max_files_per_commit is not None:
+        update_data["processing_settings.max_files_per_commit"] = item.max_files_per_commit
+    if item.max_pdfs_per_run is not None:
+        update_data["processing_settings.max_pdfs_per_run"] = item.max_pdfs_per_run
+    if item.image_zoom is not None:
+        update_data["processing_settings.image_zoom"] = item.image_zoom
+    if item.image_dpi is not None:
+        update_data["processing_settings.image_dpi"] = item.image_dpi
+    if item.max_parallel_pdfs is not None:
+        update_data["processing_settings.max_parallel_pdfs"] = item.max_parallel_pdfs
+    if item.max_workers is not None:
+        update_data["processing_settings.max_workers"] = item.max_workers
+    
+    success, message = config_manager.update_archive(archive_id, update_data)
+    return {"success": success, "message": message}
 
 @app.delete("/api/archives/{archive_id}")
 async def delete_archive(archive_id: str):
-    config = config_manager.get_config()
-    if not config.get("mongodb_uri"):
-        return {"success": False, "message": "MongoDB not configured"}
-    try:
-        client = MongoClient(config["mongodb_uri"])
-        db = client[config.get("mongodb_db", "tafsir_db")]
-        collection = db[config.get("mongodb_collection", "archive_links")]
-        result = collection.delete_one({"_id": archive_id})
-        client.close()
-        if result.deleted_count > 0:
-            return {"success": True, "message": "Archive deleted successfully"}
-        else:
-            return {"success": False, "message": "Archive not found"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    """Delete an archive item"""
+    success, message = config_manager.delete_archive(archive_id)
+    return {"success": success, "message": message}
 
 @app.get("/api/monitor/status")
 async def get_system_status():
+    """Get system status for monitoring"""
     config = config_manager.get_config()
     
-    status = {
-        "mongodb": {"connected": False, "message": "Not configured"},
-        "hf": {"connected": False, "message": "Not configured"},
-        "active_tasks": 0,
-        "total_completed": 0,
-        "total_pending": 0,
-        "total_failed": 0
-    }
-    
-    if config.get("mongodb_uri"):
+    # MongoDB Status
+    mongodb_status = {"connected": False, "message": "Not configured"}
+    if config_manager.is_connected:
+        mongodb_status = {"connected": True, "message": "Connected to MongoDB"}
+    elif config.get("mongodb_uri"):
         success, message = config_manager.test_mongodb_connection(config["mongodb_uri"])
-        status["mongodb"] = {"connected": success, "message": message}
-        
         if success:
-            try:
-                client = MongoClient(config["mongodb_uri"])
-                db = client[config.get("mongodb_db", "tafsir_db")]
-                collection = db[config.get("mongodb_collection", "archive_links")]
-                
-                status["active_tasks"] = collection.count_documents({"status": "processing"})
-                status["total_completed"] = collection.count_documents({"status": "completed"})
-                status["total_pending"] = collection.count_documents({"status": "pending"})
-                status["total_failed"] = collection.count_documents({"status": "failed"})
-                
-                client.close()
-            except:
-                pass
+            config_manager.initialize(config["mongodb_uri"], "tafsir_config")
+            mongodb_status = {"connected": True, "message": message}
+        else:
+            mongodb_status = {"connected": False, "message": message}
     
+    # HF Status
+    hf_status = {"connected": False, "message": "Not configured"}
     if config.get("hf_token"):
         success, message = config_manager.test_hf_connection(config["hf_token"])
-        status["hf"] = {"connected": success, "message": message}
+        hf_status = {"connected": success, "message": message}
     
-    return status
+    # Statistics
+    stats = config_manager.get_statistics()
+    
+    return {
+        "mongodb": mongodb_status,
+        "hf": hf_status,
+        **stats
+    }
 
 # ============ Startup Event ============
 
