@@ -1,8 +1,8 @@
 name: PDFtoIMAGEtoOCR
 
-on:
-  schedule:
-    - cron: '0 0 * * 0'  # প্রতি সাপ্তাহে রবিবার রাত ১২ টা
+#on:
+  #schedule:
+    #- cron: '0 0 * * 0'  # প্রতি সাপ্তাহে রবিবার রাত ১২ টা
   
   workflow_dispatch:
     inputs:
